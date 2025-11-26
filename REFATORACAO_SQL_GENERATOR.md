@@ -142,17 +142,10 @@ curl -X POST http://localhost:3000/api/execute-sql \
 
 Para adicionar uma nova tabela:
 
-1. **Adicionar DDL em `server/schema/ddlRegistry.js`:**
-```javascript
-DDL_REGISTRY = {
-    // ... tabelas existentes
-    nova_tabela: `CREATE TABLE nova_tabela (
-        id SERIAL PRIMARY KEY,
-        campo VARCHAR(255),
-        ...
-    );`
-}
-```
+1. **Adicionar DDL via `.env` (`DDL_REGISTRY_BASE64` ou `DDL_REGISTRY_JSON`):**
+    - Atualize o JSON que contém as tabelas (fora do repositório)
+    - Gere o novo Base64 e substitua o valor em `DDL_REGISTRY_BASE64`
+    - Opcionalmente, limpe o cache em runtime chamando `clearRegistryCache()` caso atualize sem reiniciar o servidor
 
 2. **Adicionar descrição em `server/schema/tableRegistry.js`:**
 ```javascript

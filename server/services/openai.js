@@ -1,5 +1,29 @@
 const OpenAI = require('openai');
-require('dotenv').config({ path: '../.env' });
+const fs = require('fs');
+const path = require('path');
+const dotenv = require('dotenv');
+const { sanitizeUserMessage, redactSensitiveOutput } = require('../utils/security');
+
+const ENV_CANDIDATES = [
+    process.env.ROOT_ENV_PATH,
+    path.resolve(__dirname, '../../.env'),
+    path.resolve(__dirname, '../.env'),
+    path.resolve(process.cwd(), '../.env'),
+    path.resolve(process.cwd(), '.env')
+].filter(Boolean);
+
+let envLoaded = false;
+for (const candidate of ENV_CANDIDATES) {
+    if (fs.existsSync(candidate)) {
+        dotenv.config({ path: candidate });
+        envLoaded = true;
+        break;
+    }
+}
+
+if (!envLoaded) {
+    dotenv.config();
+}
 
 const openai = new OpenAI({
     apiKey: process.env.VITE_OPENAI_API_KEY
@@ -29,7 +53,7 @@ const TOOLS = [
         type: "function",
         function: {
             name: "findUserAndUpdate",
-            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário.",
+            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil.",
             parameters: {
                 type: "object",
                 properties: {
@@ -39,7 +63,8 @@ const TOOLS = [
                     newName: { type: "string", description: "Novo nome completo" },
                     newEmail: { type: "string", description: "Novo email" },
                     newPassword: { type: "string", description: "Nova senha" },
-                    newCpf: { type: "string", description: "Novo CPF" }
+                    newCpf: { type: "string", description: "Novo CPF" },
+                    newProfile: { type: "string", enum: ["MASTER", "OPERACIONAL"], description: "Novo perfil do usuário. IMPORTANTE: Promover para MASTER requer confirmação." }
                 },
                 required: []
             }
@@ -80,11 +105,12 @@ const TOOLS = [
         type: "function",
         function: {
             name: "blockUsers",
-            description: "Bloquear todos os usuários de uma empresa específica (AÇÃO SENSÍVEL - requer confirmação)",
+            description: "Bloquear ou desbloquear todos os usuários de uma empresa/operação específica. Use quando o usuário pedir para bloquear/desbloquear todos os usuários de uma empresa. Bloquear requer confirmação, desbloquear é direto.",
             parameters: {
                 type: "object",
                 properties: {
-                    company: { type: "string", description: "Nome da empresa para bloquear" }
+                    company: { type: "string", description: "Nome da empresa/operação" },
+                    block: { type: "boolean", description: "true = bloquear (pede confirmação), false = desbloquear (executa direto). Padrão: true" }
                 },
                 required: ["company"]
             }
@@ -394,10 +420,75 @@ const TOOLS = [
                 required: ["action"]
             }
         }
+    },
+    {
+        type: "function",
+        function: {
+            name: "generateReport",
+            description: "Use esta função para GERAR RELATÓRIOS em CSV. Use quando o usuário pedir para 'gerar relatório', 'exportar relatório', 'baixar relatório', 'relatório CSV', 'relatório de usuários', 'relatório de comissões', etc.",
+            parameters: {
+                type: "object",
+                properties: {
+                    type: { 
+                        type: "string", 
+                        description: "Tipo de relatório: users, operations, commissions, audit, ou ID de relatório customizado (ex: custom_1234567890_abc123)"
+                    },
+                    filters: {
+                        type: "object",
+                        properties: {
+                            status: { type: "string", description: "Filtrar por status (ATIVO, BLOQUEADO, INATIVO) - apenas para relatório de usuários" },
+                            operation: { type: "string", description: "Filtrar por operação/empresa - apenas para relatório de usuários" },
+                            dateFrom: { type: "string", description: "Data inicial (YYYY-MM-DD ou MM/YYYY)" },
+                            dateTo: { type: "string", description: "Data final (YYYY-MM-DD ou MM/YYYY)" }
+                        }
+                    }
+                },
+                required: ["type"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "createCustomReport",
+            description: "Use esta função para CRIAR UM NOVO TIPO DE RELATÓRIO que não existe na tela de relatórios. Use quando o usuário pedir para 'criar um relatório de X', 'adicionar relatório de Y', 'implementar relatório de Z'. Você deve gerar um SQL válido para o relatório solicitado.",
+            parameters: {
+                type: "object",
+                properties: {
+                    name: {
+                        type: "string",
+                        description: "Nome do relatório (ex: 'Relatório de Propostas', 'Relatório de Entidades')"
+                    },
+                    description: {
+                        type: "string",
+                        description: "Descrição do que o relatório mostra"
+                    },
+                    sqlQuery: {
+                        type: "string",
+                        description: "Query SQL completa para gerar o relatório. Use aliases com aspas duplas para os nomes das colunas (ex: SELECT u.id_usuario as \"ID\", u.str_descricao as \"Nome\"). A query deve ser válida e segura."
+                    },
+                    columns: {
+                        type: "array",
+                        items: { type: "string" },
+                        description: "Lista de nomes das colunas que serão exibidas (opcional, será extraído do SQL se não fornecido)"
+                    }
+                },
+                required: ["name", "description", "sqlQuery"]
+            }
+        }
     }
 ];
 
 const processMessage = async (message) => {
+    const securityResult = sanitizeUserMessage(message);
+
+    if (securityResult.blocked) {
+        return {
+            type: 'MESSAGE',
+            content: securityResult.userFeedback
+        };
+    }
+
     try {
         const completion = await openai.chat.completions.create({
             model: "gpt-3.5-turbo",
@@ -422,8 +513,10 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 - Sempre retorne: status (sucesso/erro), resumo da operação e identificador de auditoria.
 
 ## 2. Alteração de Usuário (findUserAndUpdate / blockUser / blockUsers / resetPasswords)
-- Só altere **nome** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login ou CPF.
-- Para mudar perfil, confirme que o solicitante tem permissão (RBAC). Se não houver prova de permissão, solicite confirmação manual.
+- Só altere **nome**, **email**, **senha**, **CPF** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login.
+- Para mudar perfil para **MASTER**: requer confirmação obrigatória (ação sensível).
+- Para mudar perfil para **OPERACIONAL** ou outros: executa diretamente sem confirmação.
+- Exemplo: "Trocar o perfil do usuário teste.op para MASTER" → \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação).
 
 - **REGRA CRÍTICA - BLOQUEAR/DESBLOQUEAR**: 
   Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
@@ -435,7 +528,9 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 - Ações sensíveis:
   - \`blockUser\` com \`block: true\` (bloquear) **REQUER CONFIRMAÇÃO** - o sistema pedirá confirmação automaticamente.
   - \`blockUser\` com \`block: false\` (desbloquear) é executado diretamente sem confirmação.
-  - \`blockUsers\`, \`resetPasswords\`, ou promover para perfil MASTER exigem aviso + confirmação (pergunte "Deseja prosseguir? (SIM/NÃO)" e aguarde token).
+  - \`blockUsers\` com \`block: true\` (bloquear todos) **REQUER CONFIRMAÇÃO** - o sistema pedirá confirmação automaticamente.
+  - \`blockUsers\` com \`block: false\` (desbloquear todos) é executado diretamente sem confirmação.
+  - \`resetPasswords\`, ou promover para perfil MASTER exigem aviso + confirmação (pergunte "Deseja prosseguir? (SIM/NÃO)" e aguarde token).
 - Resets de senha devem registrar auditoria com a empresa/alcance.
 
 ## 3. Consultas de Usuários (queryUsers)
@@ -445,8 +540,11 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 - Resultados devem trazer contagem total, resumo e, quando aplicável, auditId.
 
 ## 4. Relatórios
-- Para quantitativos (“Quantidade de usuários por empresa”) utilize as funções existentes (queryUsers com agregações já oferecidas, ou descreva que o relatório ainda não existe).
-- Se solicitarem exportação (CSV / tabela), responda que a exportação ainda é manual e entregue uma tabela compacta no chat (markdown) enquanto CSV não estiver implementado.
+- Para gerar relatórios em CSV, use \`generateReport\` com o tipo e filtros apropriados.
+- Tipos disponíveis: "users" (usuários), "operations" (operações), "commissions" (comissões), "audit" (auditoria).
+- Filtros suportados: status (ATIVO/BLOQUEADO/INATIVO), operation (nome da operação), dateFrom, dateTo.
+- Quando o usuário pedir "gerar relatório", "exportar CSV", "baixar relatório", use \`generateReport\` diretamente.
+- **CRIAR NOVOS RELATÓRIOS**: Quando o usuário pedir para criar um relatório que não existe (ex: "criar relatório de propostas", "adicionar relatório de entidades"), use \`createCustomReport\` para criar um novo tipo de relatório. Você deve gerar um SQL SELECT válido e seguro. O relatório será adicionado automaticamente à tela de relatórios.
 
 ## 5. Regras Gerais
 1. **Confirmação obrigatória** para ações em massa (bloquear todos, resetar senhas, alterar perfil MASTER).
@@ -464,18 +562,26 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 
 ## 7. Exemplos Guiados
 - “Cadastrar João Silva, perfil OPERACIONAL, empresa DANIEL CRED, e-mail joao@ex.com” → validar dados e usar \`createUser\` com todos os campos obrigatórios.
-- “Trocar o perfil da usuária bruna.souza para MASTER” → confirmar permissão, solicitar confirmação (ação sensível) e usar \`findUserAndUpdate\`.
-- “Trocar o e-mail do usuário luis.eri.santos para luis@empresa.com” → validar permissão e usar \`findUserAndUpdate({ login: "luis.eri.santos", newEmail: "luis@empresa.com" })\`, retornando sempre algo como “Audit ID: 92ab1df4”.
-- "Bloquear todos os usuários da empresa DANIEL CRED" → pedir confirmação e usar \`blockUsers({ company: "DANIEL CRED" })\`.
+- "Trocar o perfil do usuário teste.op para MASTER" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação automática).
+- "Trocar o perfil do usuário teste.op para OPERACIONAL" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "OPERACIONAL" })\` (executa diretamente).
+- **"Atualize email do usuário luis.eri para luis.eri@partnergroup.com.br"** → \`findUserAndUpdate({ login: "luis.eri", newEmail: "luis.eri@partnergroup.com.br" })\` - Use diretamente, não precisa queryUsers!
+- "Trocar o e-mail do usuário luis.eri.santos para luis@empresa.com" → validar permissão e usar \`findUserAndUpdate({ login: "luis.eri.santos", newEmail: "luis@empresa.com" })\`, retornando sempre algo como "Audit ID: 92ab1df4".
+- **"Atualizar [qualquer campo] do usuário [login/email]"** → \`findUserAndUpdate({ login: "...", newEmail: "..." })\` ou \`findUserAndUpdate({ email: "...", newName: "..." })\` - Use diretamente!
+- "Bloquear todos os usuários da empresa DANIEL CRED" → pedir confirmação e usar \`blockUsers({ company: "DANIEL CRED", block: true })\`.
+- "Desbloquear todos os usuários da empresa Partner" → usar \`blockUsers({ company: "Partner", block: false })\` - executa diretamente sem confirmação!
 - **"Bloquear usuário teste.op"** → \`blockUser({ login: "teste.op", block: true })\` - Use diretamente, não precisa queryUsers!
 - **"Desbloquear usuário teste.op"** → \`blockUser({ login: "teste.op", block: false })\` - Use diretamente!
 - **"Bloquear [qualquer login/email]"** → \`blockUser({ login: "...", block: true })\` ou \`blockUser({ email: "...", block: true })\` - Use diretamente!
 - "Quero todos os usuários incluídos esta semana" → \`queryUsers({ filters: { date_from: "semana atual" } })\`.
-- "Quantidade de usuários por empresa" → usar consulta agregada disponível ou responder que o relatório ainda será implementado, retornando contagem conhecida.
+- "Quantidade de usuários por empresa" → usar consulta agregada disponível ou usar \`generateReport({ type: "operations" })\` para relatório completo.
+- **"Gerar relatório de usuários em CSV"** → \`generateReport({ type: "users" })\` - Gera e faz download do CSV!
+- **"Exportar relatório de comissões"** → \`generateReport({ type: "commissions" })\` - Gera CSV de comissões!
+- **"Baixar relatório de usuários ativos"** → \`generateReport({ type: "users", filters: { status: "ATIVO" } })\` - Gera CSV filtrado!
+- **"Gerar relatório de auditoria"** → \`generateReport({ type: "audit" })\` - Gera CSV de logs de auditoria!
 
 Seja extremamente rigoroso: valide permissão, confirme parâmetros, peça confirmação quando a ação for sensível e sempre retorne status + resumo + auditId.`
                 },
-                { role: "user", content: message }
+                { role: "user", content: securityResult.sanitizedMessage }
             ],
             tools: TOOLS,
             tool_choice: "auto"
@@ -490,9 +596,11 @@ Seja extremamente rigoroso: valide permissão, confirme parâmetros, peça confi
             };
         }
 
+        const safeContent = redactSensitiveOutput(responseMessage.content);
+
         return {
             type: 'MESSAGE',
-            content: responseMessage.content
+            content: safeContent
         };
 
     } catch (error) {

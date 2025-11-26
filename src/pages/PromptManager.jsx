@@ -66,6 +66,22 @@ const PromptManager = () => {
                     affectedCount: response.affectedCount
                 }]);
             }
+            else if (response.type === 'REPORT_READY') {
+                // Fazer download automático do relatório
+                if (response.reportUrl) {
+                    const link = document.createElement('a');
+                    link.href = response.reportUrl;
+                    link.download = `relatorio_${response.reportType}_${new Date().toISOString().split('T')[0]}.csv`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+                setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    type: 'bot',
+                    text: response.message
+                }]);
+            }
             else if (response.type === 'ERROR') {
                 setMessages(prev => [...prev, {
                     id: Date.now(),
@@ -88,10 +104,20 @@ const PromptManager = () => {
             const authHeaders = user && user.id ? { 'x-user-id': user.id.toString() } : {};
             const response = await confirmAction(token, authHeaders);
 
+            // Se for relatório, fazer download automático
+            if (response.type === 'REPORT_READY' && response.reportUrl) {
+                const link = document.createElement('a');
+                link.href = response.reportUrl;
+                link.download = `relatorio_${response.reportType}_${new Date().toISOString().split('T')[0]}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 type: 'bot',
-                text: response.message
+                text: response.message || response.content || 'Ação confirmada com sucesso!'
             }]);
 
             // Refresh user list

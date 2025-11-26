@@ -9,6 +9,7 @@ import PromptManager from './pages/PromptManager';
 import OperationsDashboard from './pages/OperationsDashboard';
 import GroupsDashboard from './pages/GroupsDashboard';
 import UserAuditReport from './pages/UserAuditReport';
+import Reports from './pages/Reports';
 import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
@@ -29,6 +30,7 @@ function App() {
                             <Route path="operations" element={<OperationsDashboard />} />
                             <Route path="groups" element={<GroupsDashboard />} />
                             <Route path="audit" element={<UserAuditReport />} />
+                            <Route path="reports" element={<Reports />} />
                         </Route>
                     </Routes>
                 </BrowserRouter>

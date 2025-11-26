@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, MessageSquare, Building2, Users, FileText, LogOut, Shield, User } from 'lucide-react';
+import { LayoutDashboard, MessageSquare, Building2, Users, FileText, LogOut, Shield, User, FileBarChart } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../context/AuthContext';
 
@@ -14,6 +14,7 @@ const Sidebar = () => {
         { path: '/operations', icon: Building2, label: 'Operações' },
         { path: '/groups', icon: Users, label: 'Grupos' },
         { path: '/audit', icon: FileText, label: 'Auditoria' },
+        { path: '/reports', icon: FileBarChart, label: 'Relatórios' },
         { path: '/prompt-manager', icon: MessageSquare, label: 'Prompt Manager' },
     ];
 

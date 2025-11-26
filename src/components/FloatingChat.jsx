@@ -125,6 +125,22 @@ const FloatingChat = () => {
                     text: response.message
                 }]);
             }
+            else if (response.type === 'REPORT_READY') {
+                // Fazer download automático do relatório
+                if (response.reportUrl) {
+                    const link = document.createElement('a');
+                    link.href = response.reportUrl;
+                    link.download = `relatorio_${response.reportType}_${new Date().toISOString().split('T')[0]}.csv`;
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                }
+                setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    type: 'bot',
+                    text: response.message
+                }]);
+            }
             else if (response.type === 'ERROR') {
                 setMessages(prev => [...prev, {
                     id: Date.now(),
@@ -157,6 +173,17 @@ const FloatingChat = () => {
             // Criar headers diretamente do user.id
             const authHeaders = user && user.id ? { 'x-user-id': user.id.toString() } : {};
             const response = await confirmAction(pendingAction.token, authHeaders);
+            
+            // Se for relatório, fazer download automático
+            if (response.type === 'REPORT_READY' && response.reportUrl) {
+                const link = document.createElement('a');
+                link.href = response.reportUrl;
+                link.download = `relatorio_${response.reportType}_${new Date().toISOString().split('T')[0]}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }
+            
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 type: 'bot',

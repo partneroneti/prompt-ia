@@ -5,19 +5,20 @@ Esta arquitetura foi implementada para otimizar a geração de SQL em bancos com
 ## Estrutura
 
 ### 1. `ddlRegistry.js`
-Contém os DDLs completos (`CREATE TABLE`) de todas as tabelas do banco.
+Carrega dinamicamente os DDLs completos (`CREATE TABLE`) de todas as tabelas a partir de variáveis de ambiente (`DDL_REGISTRY_BASE64` ou `DDL_REGISTRY_JSON`). Dessa forma, o esquema não fica exposto no repositório.
 
-**Como adicionar novas tabelas:**
-```javascript
-const DDL_REGISTRY = {
-    nome_tabela: `CREATE TABLE nome_tabela (
-        id SERIAL PRIMARY KEY,
-        campo VARCHAR(255),
-        ...
-    );`,
-    // ... adicionar mais tabelas
-};
+**Como adicionar novas tabelas agora:**
+1. Monte um objeto JSON com os novos DDLs:
+```json
+{
+  "tb_exemplo": "CREATE TABLE tb_exemplo (...);"
+}
 ```
+2. Converta o JSON para Base64 e salve o resultado em `DDL_REGISTRY_BASE64` (arquivo `.env`).
+```bash
+cat ddl-registry.json | base64 | pbcopy
+```
+3. Também é possível definir `DDL_REGISTRY_JSON` diretamente com o JSON (útil apenas em ambientes controlados).
 
 ### 2. `tableRegistry.js`
 Contém apenas uma lista resumida (`nome: descrição`) para a fase de triagem.
@@ -107,14 +108,7 @@ Executa um SQL gerado (apenas SELECT por segurança).
 
 Para adicionar uma nova tabela ao sistema:
 
-1. **Adicionar DDL completo** em `ddlRegistry.js`:
-```javascript
-nova_tabela: `CREATE TABLE nova_tabela (
-    id SERIAL PRIMARY KEY,
-    campo VARCHAR(255),
-    ...
-);`
-```
+1. **Atualizar o JSON de DDL fora do repositório** e regenerar `DDL_REGISTRY_BASE64` (ou `DDL_REGISTRY_JSON`). Recarregue o servidor ou chame `clearRegistryCache()` para aplicar imediatamente.
 
 2. **Adicionar descrição resumida** em `tableRegistry.js`:
 ```javascript

@@ -404,6 +404,15 @@ Para dúvidas ou problemas:
 
 ---
 
+## 🔐 Segurança de DDLs e Prompt Injection
+
+- **DDLs protegidos**: os esquemas completos agora são carregados via `DDL_REGISTRY_BASE64` (ou `DDL_REGISTRY_JSON`). Gere um arquivo JSON com todas as tabelas, execute `cat ddl.json | base64` e copie o resultado para o `.env`.
+- **Variável customizada para .env**: use `ROOT_ENV_PATH=/caminho/para/.env` caso o arquivo fique fora do diretório padrão.
+- **Bloqueio de pedidos sensíveis**: solicitações para revelar DDL, senhas ou informações confidenciais são detectadas e bloqueadas antes de chegar ao modelo.
+- **Redação automática**: qualquer menção acidental a DDLs ou senhas em respostas é substituída por `[REDACTED]`, evitando vazamentos.
+
+---
+
 ## 🚧 Próximas Melhorias
 
 - [ ] Adicionar filtros por `id_operacao` e `id_grupo`
