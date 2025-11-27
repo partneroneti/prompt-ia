@@ -34,18 +34,18 @@ const TOOLS = [
         type: "function",
         function: {
             name: "createUser",
-            description: "Cadastrar um novo usuário no sistema",
+            description: "CRIAR/CADASTRAR um novo usuário no sistema. Use APENAS quando o usuário pedir para 'criar', 'cadastrar' ou 'adicionar' usuário. NÃO use para relatórios ou consultas.",
             parameters: {
                 type: "object",
                 properties: {
                     name: { type: "string", description: "Nome completo do usuário" },
                     login: { type: "string", description: "Login único (ex.: joao.silva). Imutável após criação." },
-                    profile: { type: "string", enum: ["MASTER", "OPERACIONAL"], description: "Perfil de acesso" },
+                    profile: { type: "string", description: "Perfil de acesso (ex: MASTER, OPERACIONAL, ou outro perfil válido do sistema). Use queryProfiles para listar perfis disponíveis." },
                     company: { type: "string", description: "Nome da empresa" },
                     email: { type: "string", description: "Email corporativo do usuário" },
-                    cpf: { type: "string", description: "CPF do usuário (opcional, mas imutável após criação)" }
+                    cpf: { type: "string", description: "CPF do usuário (OBRIGATÓRIO, imutável após criação)" }
                 },
-                required: ["name", "login", "email", "profile", "company"]
+                required: ["name", "login", "email", "cpf", "profile", "company"]
             }
         }
     },
@@ -64,7 +64,7 @@ const TOOLS = [
                     newEmail: { type: "string", description: "Novo email" },
                     newPassword: { type: "string", description: "Nova senha" },
                     newCpf: { type: "string", description: "Novo CPF" },
-                    newProfile: { type: "string", enum: ["MASTER", "OPERACIONAL"], description: "Novo perfil do usuário. IMPORTANTE: Promover para MASTER requer confirmação." }
+                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis." }
                 },
                 required: []
             }
@@ -425,7 +425,7 @@ const TOOLS = [
         type: "function",
         function: {
             name: "generateReport",
-            description: "Use esta função para GERAR RELATÓRIOS em CSV. Use quando o usuário pedir para 'gerar relatório', 'exportar relatório', 'baixar relatório', 'relatório CSV', 'relatório de usuários', 'relatório de comissões', etc.",
+            description: "GERAR/EXPORTAR RELATÓRIOS em CSV. Use APENAS quando o usuário pedir para 'gerar relatório', 'exportar relatório', 'baixar relatório', 'relatório CSV', 'exportar CSV'. NÃO use para criar usuários - use createUser para isso.",
             parameters: {
                 type: "object",
                 properties: {
@@ -451,7 +451,7 @@ const TOOLS = [
         type: "function",
         function: {
             name: "createCustomReport",
-            description: "Use esta função para CRIAR UM NOVO TIPO DE RELATÓRIO que não existe na tela de relatórios. Use quando o usuário pedir para 'criar um relatório de X', 'adicionar relatório de Y', 'implementar relatório de Z'. Você deve gerar um SQL válido para o relatório solicitado.",
+            description: "CRIAR UM NOVO TIPO DE RELATÓRIO (não existe ainda). Use APENAS quando o usuário pedir para 'criar um relatório de X', 'adicionar relatório de Y'. NÃO use para criar usuários - use createUser para isso.",
             parameters: {
                 type: "object",
                 properties: {
@@ -465,7 +465,7 @@ const TOOLS = [
                     },
                     sqlQuery: {
                         type: "string",
-                        description: "Query SQL completa para gerar o relatório. Use aliases com aspas duplas para os nomes das colunas (ex: SELECT u.id_usuario as \"ID\", u.str_descricao as \"Nome\"). A query deve ser válida e segura."
+                        description: "Query SQL completa para gerar o relatório (OPCIONAL). Se não fornecido, o sistema gerará automaticamente usando a descrição. Se fornecido, use apenas tabelas que começam com 'tb_' e os nomes EXATOS das colunas. Use aliases com aspas duplas para os nomes das colunas (ex: SELECT u.id_usuario as \"ID\", u.str_descricao as \"Nome\"). A query será testada antes de ser salva."
                     },
                     columns: {
                         type: "array",
@@ -473,7 +473,7 @@ const TOOLS = [
                         description: "Lista de nomes das colunas que serão exibidas (opcional, será extraído do SQL se não fornecido)"
                     }
                 },
-                required: ["name", "description", "sqlQuery"]
+                required: ["name", "description"]
             }
         }
     }
@@ -497,6 +497,15 @@ const processMessage = async (message) => {
                     role: "system",
                     content: `Você é um assistente de Gestão de Usuários via IA. Execute ações apenas usando as funções disponíveis e siga TODAS as regras abaixo.
 
+🚨 REGRA CRÍTICA - PRIORIZAR CRIAÇÃO DE USUÁRIO:
+Quando o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário", "criar um usuário", "novo usuário":
+1. SEMPRE use createUser - NUNCA crie um relatório!
+2. Se faltar CPF, solicite o CPF e aguarde antes de criar
+3. Se faltar outros campos, solicite os campos faltantes
+4. NUNCA use generateReport ou createCustomReport quando o pedido é criar usuário
+5. "Criar usuário [Nome]" = criar o usuário com aquele nome, NÃO criar relatório
+6. Exemplo: "Criar usuário João" → createUser (criar o usuário João), NÃO createCustomReport
+
 🚨 REGRA CRÍTICA - BLOQUEAR/DESBLOQUEAR USUÁRIO:
 Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 1. Use blockUser DIRETAMENTE com login ou email - NÃO precisa fazer queryUsers primeiro!
@@ -506,16 +515,28 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 ---
 
 ## 1. Inclusão de Usuário (createUser)
-- Só use \`createUser\` após coletar **nome, login, e-mail, perfil e empresa**.
-- Campos obrigatórios do payload: \`name\`, \`login\`, \`email\`, \`profile\`, \`company\`. Sem um deles, peça ao solicitante.
-- Gere o CPF apenas se o usuário não informar; depois de criado, **login e CPF são imutáveis**.
-- Antes de criar, valide duplicidades (mesmo login ou e-mail já informado).
+- Só use \`createUser\` após coletar **nome, login, e-mail, CPF, perfil e empresa**.
+- Campos obrigatórios do payload: \`name\`, \`login\`, \`email\`, \`cpf\`, \`profile\`, \`company\`.
+- **CPF é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere CPF automaticamente.
+- **Se o usuário tentar criar sem CPF**, você deve:
+  1. **NÃO chamar** a função \`createUser\`
+  2. **Solicitar o CPF** de forma clara e instrutiva
+  3. **Mostrar exemplo** de como informar o CPF
+
+**Exemplo de resposta quando CPF está faltando**:
+\`\`\`
+O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED
+\`\`\`
+
+- Depois de criado, **login e CPF são imutáveis**.
+- Antes de criar, valide duplicidades (mesmo login, e-mail ou CPF já informado).
 - Sempre retorne: status (sucesso/erro), resumo da operação e identificador de auditoria.
 
 ## 2. Alteração de Usuário (findUserAndUpdate / blockUser / blockUsers / resetPasswords)
 - Só altere **nome**, **email**, **senha**, **CPF** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login.
 - Para mudar perfil para **MASTER**: requer confirmação obrigatória (ação sensível).
-- Para mudar perfil para **OPERACIONAL** ou outros: executa diretamente sem confirmação.
+- Para mudar perfil para outros perfis: executa diretamente sem confirmação.
+- O sistema suporta múltiplos tipos de perfis do banco de dados, não apenas MASTER e OPERACIONAL. Use queryProfiles para listar todos os perfis disponíveis.
 - Exemplo: "Trocar o perfil do usuário teste.op para MASTER" → \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação).
 
 - **REGRA CRÍTICA - BLOQUEAR/DESBLOQUEAR**: 
@@ -540,11 +561,17 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 - Resultados devem trazer contagem total, resumo e, quando aplicável, auditId.
 
 ## 4. Relatórios
+⚠️ **IMPORTANTE**: Se o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário" → use \`createUser\`. NÃO crie relatórios!
+
 - Para gerar relatórios em CSV, use \`generateReport\` com o tipo e filtros apropriados.
 - Tipos disponíveis: "users" (usuários), "operations" (operações), "commissions" (comissões), "audit" (auditoria).
 - Filtros suportados: status (ATIVO/BLOQUEADO/INATIVO), operation (nome da operação), dateFrom, dateTo.
 - Quando o usuário pedir "gerar relatório", "exportar CSV", "baixar relatório", use \`generateReport\` diretamente.
-- **CRIAR NOVOS RELATÓRIOS**: Quando o usuário pedir para criar um relatório que não existe (ex: "criar relatório de propostas", "adicionar relatório de entidades"), use \`createCustomReport\` para criar um novo tipo de relatório. Você deve gerar um SQL SELECT válido e seguro. O relatório será adicionado automaticamente à tela de relatórios.
+- **CRIAR NOVOS RELATÓRIOS**: Quando o usuário pedir para criar um relatório que não existe (ex: "criar relatório de propostas", "adicionar relatório de entidades"), use \`createCustomReport\` para criar um novo tipo de relatório. 
+
+**IMPORTANTE**: Você pode fornecer apenas name e description - o sistema gerará automaticamente o SQL usando o mesmo processo de consulta (seleção dinâmica de tabelas + geração de SQL baseada no schema). Isso garante que a query será válida e usará os nomes corretos de tabelas e colunas.
+
+Se preferir fornecer SQL manualmente, use apenas tabelas que começam com "tb_" e os nomes EXATOS das colunas. A query será testada antes de ser salva.
 
 ## 5. Regras Gerais
 1. **Confirmação obrigatória** para ações em massa (bloquear todos, resetar senhas, alterar perfil MASTER).
@@ -561,7 +588,23 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 - **Consultas adicionais**: \`queryProposals\`, \`queryCommissions\`, \`queryEntities\`, \`queryCampaigns\`, etc.
 
 ## 7. Exemplos Guiados
-- “Cadastrar João Silva, perfil OPERACIONAL, empresa DANIEL CRED, e-mail joao@ex.com” → validar dados e usar \`createUser\` com todos os campos obrigatórios.
+
+### 7.1 Criar Usuário (com todos os dados)
+- "Cadastrar João Silva, CPF 123.456.789-00, perfil OPERACIONAL, empresa DANIEL CRED, e-mail joao@ex.com, login joao.silva" 
+  → ✅ Todos os campos presentes, usar \`createUser\` diretamente
+
+### 7.2 Criar Usuário (SEM CPF - SITUAÇÃO CRÍTICA)
+**Cenário**: Usuário tenta cadastrar sem CPF
+
+**Você DEVE responder assim** (NÃO chame createUser):
+\`\`\`
+O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED
+\`\`\`
+
+**REGRAS IMPORTANTES**:
+- ❌ **NUNCA chame** \`createUser\` sem CPF
+- ✅ **SEMPRE use** a mensagem simples e direta acima
+- ✅ Mantenha a resposta **concisa** - apenas uma linha com o exemplo
 - "Trocar o perfil do usuário teste.op para MASTER" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação automática).
 - "Trocar o perfil do usuário teste.op para OPERACIONAL" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "OPERACIONAL" })\` (executa diretamente).
 - **"Atualize email do usuário luis.eri para luis.eri@partnergroup.com.br"** → \`findUserAndUpdate({ login: "luis.eri", newEmail: "luis.eri@partnergroup.com.br" })\` - Use diretamente, não precisa queryUsers!

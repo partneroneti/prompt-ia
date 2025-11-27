@@ -74,7 +74,7 @@ const Reports = () => {
                 const data = await response.json();
                 setCustomReports(data);
                 
-                // Adicionar relatórios customizados à lista
+                // Adicionar relatórios customizados à lista (removendo os antigos primeiro)
                 const customReportTypes = data.map(report => ({
                     id: report.id,
                     name: report.name,
@@ -83,13 +83,35 @@ const Reports = () => {
                     isCustom: true
                 }));
                 
-                setReportTypes(prev => [...prev, ...customReportTypes]);
+                // Remover relatórios customizados antigos e adicionar os novos
+                setReportTypes(prev => {
+                    const standardReports = prev.filter(r => !r.isCustom);
+                    return [...standardReports, ...customReportTypes];
+                });
             } catch (error) {
                 console.error('Erro ao carregar relatórios customizados:', error);
             }
         };
         
         fetchCustomReports();
+        
+        // Listener para recarregar quando um novo relatório é criado
+        const handleReload = () => {
+            fetchCustomReports();
+        };
+        
+        window.addEventListener('reloadCustomReports', handleReload);
+        
+        // Verificar se há um tipo na URL (quando vem do chat)
+        const urlParams = new URLSearchParams(window.location.search);
+        const typeFromUrl = urlParams.get('type');
+        if (typeFromUrl && typeFromUrl.startsWith('custom_')) {
+            setSelectedReport(typeFromUrl);
+        }
+        
+        return () => {
+            window.removeEventListener('reloadCustomReports', handleReload);
+        };
     }, []);
 
     const generateReport = async () => {
@@ -151,7 +173,8 @@ const Reports = () => {
             });
 
             if (!response.ok) {
-                throw new Error('Erro ao visualizar relatório');
+                const errorData = await response.json().catch(() => ({ error: 'Erro desconhecido' }));
+                throw new Error(errorData.error || errorData.message || 'Erro ao visualizar relatório');
             }
 
             const data = await response.json();
@@ -168,7 +191,7 @@ const Reports = () => {
             }
         } catch (error) {
             console.error('Erro ao visualizar relatório:', error);
-            alert('Erro ao visualizar relatório.');
+            alert(`Erro ao visualizar relatório: ${error.message || 'Erro desconhecido'}`);
             setPreviewData(null);
             setPreviewColumns([]);
         } finally {

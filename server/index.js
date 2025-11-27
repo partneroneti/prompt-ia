@@ -5,12 +5,12 @@ const fs = require('fs');
 const path = require('path');
 const { processMessage } = require('./services/openai');
 const { storePendingAction, getPendingAction, deletePendingAction } = require('./middleware/confirmationStore');
-const { createCustomReport, getCustomReport, getAllCustomReports } = require('./middleware/customReportsStore');
 const dateHelper = require('./helpers/dateHelper');
 const { gerarSQLCompleto } = require('./services/sqlGenerator');
 const rbacHelper = require('./helpers/rbacHelper');
 const profileHelper = require('./helpers/profileHelper');
 const entityHelper = require('./helpers/entityHelper');
+const { createCustomReport, getCustomReport, getAllCustomReports } = require('./middleware/customReportsStore');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -413,6 +413,292 @@ app.put('/api/users/:login/email', async (req, res) => {
     }
 });
 
+// ============================================
+// ENDPOINTS PARA ROLES, PERFIS E RELAÇÕES
+// ============================================
+
+// GET /api/roles - Listar todas as roles
+app.get('/api/roles', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT 
+                id_role,
+                str_descricao as nome,
+                str_ativo,
+                CASE 
+                    WHEN str_ativo = 'A' THEN 'ATIVO'
+                    WHEN str_ativo = 'E' THEN 'INATIVO'
+                    ELSE 'DESCONHECIDO'
+                END as status
+             FROM tb_role
+             ORDER BY str_descricao`
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao listar roles:', err);
+        res.status(500).json({ error: 'Erro ao buscar roles' });
+    }
+});
+
+// GET /api/profiles - Listar todos os perfis
+app.get('/api/profiles', async (req, res) => {
+    try {
+        const result = await db.query(
+            `SELECT 
+                id_perfil,
+                str_descricao as nome,
+                id_operacao,
+                str_ativo,
+                CASE 
+                    WHEN str_ativo = 'A' THEN 'ATIVO'
+                    WHEN str_ativo = 'E' THEN 'INATIVO'
+                    ELSE 'DESCONHECIDO'
+                END as status
+             FROM tb_perfil
+             ORDER BY str_descricao`
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao listar perfis:', err);
+        res.status(500).json({ error: 'Erro ao buscar perfis' });
+    }
+});
+
+// GET /api/profiles/:id/roles - Listar roles de um perfil específico (por ID)
+app.get('/api/profiles/:id/roles', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await db.query(
+            `SELECT 
+                r.id_role,
+                r.str_descricao as role_nome,
+                pr.id as relacionamento_id,
+                pr.str_ativo as rel_ativo
+             FROM tb_perfil p
+             JOIN tb_perfil_role pr ON p.id_perfil = pr.id_perfil
+             JOIN tb_role r ON pr.id_role = r.id_role
+             WHERE p.id_perfil = $1 
+               AND p.str_ativo = 'A'
+               AND pr.str_ativo = 'A'
+               AND r.str_ativo = 'A'
+             ORDER BY r.str_descricao`,
+            [id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao listar roles do perfil:', err);
+        res.status(500).json({ error: 'Erro ao buscar roles do perfil' });
+    }
+});
+
+// GET /api/profiles/by-name/:name/roles - Listar roles de um perfil pelo nome (ex: MASTER)
+app.get('/api/profiles/by-name/:name/roles', async (req, res) => {
+    try {
+        const { name } = req.params;
+        const result = await db.query(
+            `SELECT 
+                p.id_perfil,
+                p.str_descricao as perfil_nome,
+                r.id_role,
+                r.str_descricao as role_nome,
+                pr.id as relacionamento_id,
+                pr.str_ativo as rel_ativo
+             FROM tb_perfil p
+             LEFT JOIN tb_perfil_role pr ON p.id_perfil = pr.id_perfil AND pr.str_ativo = 'A'
+             LEFT JOIN tb_role r ON pr.id_role = r.id_role AND r.str_ativo = 'A'
+             WHERE UPPER(p.str_descricao) = UPPER($1)
+               AND p.str_ativo = 'A'
+             ORDER BY r.str_descricao`,
+            [name]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: `Perfil "${name}" não encontrado` });
+        }
+        
+        // Verificar se o perfil tem roles
+        const roles = result.rows.filter(row => row.role_nome !== null);
+        
+        res.json({
+            perfil: {
+                id_perfil: result.rows[0].id_perfil,
+                nome: result.rows[0].perfil_nome
+            },
+            roles: roles.map(row => ({
+                id_role: row.id_role,
+                nome: row.role_nome,
+                relacionamento_id: row.relacionamento_id
+            })),
+            total_roles: roles.length,
+            tem_roles: roles.length > 0
+        });
+    } catch (err) {
+        console.error('Erro ao listar roles do perfil:', err);
+        res.status(500).json({ error: 'Erro ao buscar roles do perfil' });
+    }
+});
+
+// GET /api/users/:id/profiles - Listar perfis de um usuário
+app.get('/api/users/:id/profiles', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await db.query(
+            `SELECT 
+                p.id_perfil,
+                p.str_descricao as perfil_nome,
+                up.id as relacionamento_id,
+                up.str_ativo as rel_ativo
+             FROM tb_usuario u
+             JOIN tb_usuario_perfil up ON u.id_usuario = up.id_usuario
+             JOIN tb_perfil p ON up.id_perfil = p.id_perfil
+             WHERE u.id_usuario = $1 
+               AND u.str_ativo = 'A'
+               AND up.str_ativo = 'A'
+               AND p.str_ativo = 'A'
+             ORDER BY p.str_descricao`,
+            [id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao listar perfis do usuário:', err);
+        res.status(500).json({ error: 'Erro ao buscar perfis do usuário' });
+    }
+});
+
+// GET /api/users/:id/roles - Listar todas as roles de um usuário (através dos perfis)
+app.get('/api/users/:id/roles', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await db.query(
+            `SELECT DISTINCT
+                r.id_role,
+                r.str_descricao as role_nome,
+                p.id_perfil,
+                p.str_descricao as perfil_nome
+             FROM tb_usuario u
+             JOIN tb_usuario_perfil up ON u.id_usuario = up.id_usuario
+             JOIN tb_perfil p ON up.id_perfil = p.id_perfil
+             JOIN tb_perfil_role pr ON p.id_perfil = pr.id_perfil
+             JOIN tb_role r ON pr.id_role = r.id_role
+             WHERE u.id_usuario = $1 
+               AND u.str_ativo = 'A'
+               AND up.str_ativo = 'A'
+               AND p.str_ativo = 'A'
+               AND pr.str_ativo = 'A'
+               AND r.str_ativo = 'A'
+             ORDER BY r.str_descricao`,
+            [id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao listar roles do usuário:', err);
+        res.status(500).json({ error: 'Erro ao buscar roles do usuário' });
+    }
+});
+
+// GET /api/auth/permissions - Buscar permissões do usuário logado (roles e permissões resumidas)
+app.get('/api/auth/permissions', async (req, res) => {
+    try {
+        const headerUser = req.header('x-user-id') || req.header('x-userid');
+        const userId = headerUser ? parseInt(headerUser, 10) : req.currentUserId;
+
+        if (!userId) {
+            return res.status(401).json({ error: 'Usuário não autenticado' });
+        }
+
+        // Verificar se é MASTER
+        const isMasterUser = await rbacHelper.isMaster(userId);
+        
+        // Buscar todas as roles do usuário
+        const rolesResult = await db.query(
+            `SELECT DISTINCT
+                r.str_descricao as role_name
+             FROM tb_usuario u
+             JOIN tb_usuario_perfil up ON u.id_usuario = up.id_usuario
+             JOIN tb_perfil p ON up.id_perfil = p.id_perfil
+             LEFT JOIN tb_perfil_role pr ON p.id_perfil = pr.id_perfil AND pr.str_ativo = 'A'
+             LEFT JOIN tb_role r ON pr.id_role = r.id_role AND r.str_ativo = 'A'
+             WHERE u.id_usuario = $1 
+               AND u.str_ativo = 'A'
+               AND up.str_ativo = 'A'
+               AND p.str_ativo = 'A'
+             ORDER BY r.str_descricao`,
+            [userId]
+        );
+
+        const roles = rolesResult.rows
+            .filter(row => row.role_name)
+            .map(row => row.role_name);
+
+        // Buscar resumo de permissões
+        const permissionSummary = await rbacHelper.getPermissionSummary(userId);
+
+        res.json({
+            user_id: userId,
+            is_master: isMasterUser,
+            roles: roles,
+            permissions: permissionSummary,
+            has_roles: roles.length > 0 || isMasterUser
+        });
+    } catch (err) {
+        console.error('Erro ao buscar permissões:', err);
+        res.status(500).json({ error: 'Erro ao buscar permissões do usuário' });
+    }
+});
+
+// GET /api/roles-relations - Visualizar relações completas entre usuários, perfis e roles
+app.get('/api/roles-relations', async (req, res) => {
+    try {
+        const { user_id, profile_id, role_id } = req.query;
+        
+        let whereConditions = ['u.str_ativo = $1', 'up.str_ativo = $2', 'p.str_ativo = $3', 'pr.str_ativo = $4', 'r.str_ativo = $5'];
+        const params = ['A', 'A', 'A', 'A', 'A'];
+        let paramCount = 6;
+
+        if (user_id) {
+            whereConditions.push(`u.id_usuario = $${paramCount}`);
+            params.push(user_id);
+            paramCount++;
+        }
+        if (profile_id) {
+            whereConditions.push(`p.id_perfil = $${paramCount}`);
+            params.push(profile_id);
+            paramCount++;
+        }
+        if (role_id) {
+            whereConditions.push(`r.id_role = $${paramCount}`);
+            params.push(role_id);
+            paramCount++;
+        }
+
+        const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
+
+        const result = await db.query(
+            `SELECT 
+                u.id_usuario,
+                u.str_descricao as usuario_nome,
+                u.str_login,
+                p.id_perfil,
+                p.str_descricao as perfil_nome,
+                r.id_role,
+                r.str_descricao as role_nome
+             FROM tb_usuario u
+             JOIN tb_usuario_perfil up ON u.id_usuario = up.id_usuario
+             JOIN tb_perfil p ON up.id_perfil = p.id_perfil
+             JOIN tb_perfil_role pr ON p.id_perfil = pr.id_perfil
+             JOIN tb_role r ON pr.id_role = r.id_role
+             ${whereClause}
+             ORDER BY u.str_descricao, p.str_descricao, r.str_descricao
+             LIMIT 500`,
+            params
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('Erro ao buscar relações:', err);
+        res.status(500).json({ error: 'Erro ao buscar relações' });
+    }
+});
+
 // POST /api/chat - Process user message via OpenAI
 app.post('/api/chat', async (req, res) => {
     try {
@@ -632,17 +918,92 @@ app.post('/api/chat', async (req, res) => {
             // Handle createUser
             if (fnName === 'createUser') {
                 const { name, login, profile, company, email, cpf } = args;
+                console.log('[CREATE_USER] Args recebidos:', { name, login, profile, company, email, cpf, cpfType: typeof cpf, cpfLength: cpf?.length });
+                
                 const sanitizedLogin = (login || '').trim().toLowerCase();
 
-                if (!name || !sanitizedLogin || !email || !profile || !company) {
+                // Validar CPF - BLOQUEAR se não existir ou for inválido
+                // CPF é OBRIGATÓRIO e deve ser uma string válida
+                if (!cpf || cpf === undefined || cpf === null || cpf === '' || String(cpf).trim() === '' || String(cpf).trim() === 'undefined' || String(cpf).trim() === 'null') {
+                    console.log('[CREATE_USER] CPF inválido ou faltando - bloqueando criação', { cpf, type: typeof cpf });
                     return res.status(400).json({
                         type: 'ERROR',
-                        message: 'Informe nome, login, e-mail, perfil e empresa para cadastrar um usuário.'
+                        message: `O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED`
+                    });
+                }
+                
+                // Sanitizar CPF apenas se existir e for válido
+                const sanitizedCpf = String(cpf).trim();
+                
+                // Validação adicional: CPF não pode ser vazio após trim
+                if (sanitizedCpf === '' || sanitizedCpf.length < 10) {
+                    console.log('[CREATE_USER] CPF inválido após sanitização - bloqueando criação', { sanitizedCpf, length: sanitizedCpf.length });
+                    return res.status(400).json({
+                        type: 'ERROR',
+                        message: `O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED`
+                    });
+                }
+                
+                console.log('[CREATE_USER] CPF validado:', { original: cpf, sanitized: sanitizedCpf });
+
+                // Validar outros campos obrigatórios
+                const missingFields = [];
+                if (!name || !name.trim()) missingFields.push('nome');
+                if (!sanitizedLogin) missingFields.push('login');
+                if (!email || !email.trim()) missingFields.push('email');
+                if (!profile || !profile.trim()) missingFields.push('perfil');
+                if (!company || !company.trim()) missingFields.push('empresa');
+
+                // Outros campos obrigatórios faltando
+                if (missingFields.length > 0) {
+                    const fieldsList = missingFields.join(', ');
+                    return res.status(400).json({
+                        type: 'ERROR',
+                        message: `Campos obrigatórios faltando: ${fieldsList}. O CPF é obrigatório. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED`
                     });
                 }
 
                 try {
-                    const finalCpf = cpf || '000.000.000-00';
+                    // Validar duplicidades antes de inserir
+                    const existingUser = await db.query(
+                        `SELECT str_login, email, str_cpf 
+                         FROM tb_usuario 
+                         WHERE str_login = $1 OR email = $2 OR str_cpf = $3
+                         LIMIT 1`,
+                        [sanitizedLogin, email, sanitizedCpf]
+                    );
+
+                    if (existingUser.rows.length > 0) {
+                        const existing = existingUser.rows[0];
+                        if (existing.str_login === sanitizedLogin) {
+                            return res.json({
+                                type: 'ERROR',
+                                message: `Erro: Já existe um usuário com o login "${sanitizedLogin}". Tente outro login.`
+                            });
+                        }
+                        if (existing.email === email) {
+                            return res.json({
+                                type: 'ERROR',
+                                message: `Erro: Já existe um usuário com o email "${email}". Tente outro email.`
+                            });
+                        }
+                        if (existing.str_cpf && existing.str_cpf === sanitizedCpf) {
+                            return res.json({
+                                type: 'ERROR',
+                                message: `Erro: Já existe um usuário com o CPF "${sanitizedCpf}". Verifique os dados.`
+                            });
+                        }
+                    }
+
+                    // Validação dupla do CPF antes do INSERT
+                    if (!sanitizedCpf || sanitizedCpf.trim() === '' || sanitizedCpf === 'undefined' || sanitizedCpf === 'null') {
+                        console.error('[CREATE_USER] ERRO CRÍTICO: Tentativa de inserir com CPF inválido!', { sanitizedCpf, cpf });
+                        return res.status(400).json({
+                            type: 'ERROR',
+                            message: `O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@ex.com, perfil OPERACIONAL, empresa DANIEL CRED`
+                        });
+                    }
+
                     const operationLookup = await db.query(
                         `SELECT id_operacao FROM tb_operacao WHERE UPPER(str_descricao) = UPPER($1) LIMIT 1`,
                         [company]
@@ -656,14 +1017,25 @@ app.post('/api/chat', async (req, res) => {
                         ) 
                          VALUES ($1, $2, $3, $4, 'A', false, $5, 1, $6) 
                          RETURNING id_usuario as id, str_descricao as name, str_login as login, email`,
-                        [name, sanitizedLogin, email, finalCpf, operationId, req.currentUserId]
+                        [name, sanitizedLogin, email, sanitizedCpf, operationId, req.currentUserId]
                     );
 
-                    const auditDbId = await createAuditLog('CREATE_USER', result.rows[0].id, {
+                    const newUserId = result.rows[0].id;
+
+                    // Associar perfil ao usuário criado
+                    const profileData = await profileHelper.getProfileByName(profile);
+                    if (profileData) {
+                        await profileHelper.assignProfile(newUserId, profileData.id_perfil, req.currentUserId);
+                    } else {
+                        console.warn(`[CREATE_USER] Perfil "${profile}" não encontrado. Usuário criado sem perfil.`);
+                    }
+
+                    const auditDbId = await createAuditLog('CREATE_USER', newUserId, {
                         performedBy: req.currentUserId,
                         company,
                         profile,
-                        login: sanitizedLogin
+                        login: sanitizedLogin,
+                        cpf: sanitizedCpf
                     });
                     const auditLabel = formatAuditId(auditDbId);
 
@@ -1985,342 +2357,6 @@ app.post('/api/chat', async (req, res) => {
                 }
             }
 
-            // Handle createCustomReport
-            if (fnName === 'createCustomReport') {
-                const { name, description, sqlQuery, columns = [] } = args;
-                
-                // Validar SQL básico (não permitir DROP, DELETE, UPDATE, etc)
-                const dangerousKeywords = ['DROP', 'DELETE', 'UPDATE', 'INSERT', 'ALTER', 'TRUNCATE', 'EXEC', 'EXECUTE'];
-                const sqlUpper = sqlQuery.toUpperCase();
-                for (const keyword of dangerousKeywords) {
-                    if (sqlUpper.includes(keyword)) {
-                        return res.json({
-                            type: 'ERROR',
-                            message: `Query SQL contém operação perigosa (${keyword}). Apenas SELECT é permitido.`
-                        });
-                    }
-                }
-                
-                // Verificar se é SELECT
-                if (!sqlUpper.trim().startsWith('SELECT')) {
-                    return res.json({
-                        type: 'ERROR',
-                        message: 'Apenas queries SELECT são permitidas para relatórios.'
-                    });
-                }
-                
-                // Criar relatório customizado
-                const reportId = createCustomReport({
-                    name,
-                    description,
-                    sqlQuery,
-                    columns,
-                    createdBy: req.currentUserId
-                });
-                
-                const auditDbId = await createAuditLog('CREATE_CUSTOM_REPORT', null, {
-                    performedBy: req.currentUserId,
-                    reportName: name,
-                    reportId: reportId
-                });
-                const auditLabel = formatAuditId(auditDbId);
-                
-                return res.json({
-                    type: 'ACTION_COMPLETE',
-                    message: `Relatório customizado "${name}" criado com sucesso! Agora você pode gerar este relatório usando o ID: ${reportId}. O relatório foi adicionado à tela de relatórios.`,
-                    reportId: reportId,
-                    auditId: auditLabel
-                });
-            }
-
-            // Handle generateReport
-            if (fnName === 'generateReport') {
-                const { type, filters = {} } = args;
-                
-                // Verificar se é um relatório customizado
-                let customReport = null;
-                if (type.startsWith('custom_')) {
-                    customReport = getCustomReport(type);
-                    if (!customReport) {
-                        return res.json({
-                            type: 'ERROR',
-                            message: `Relatório customizado "${type}" não encontrado.`
-                        });
-                    }
-                } else {
-                    // Validar tipo padrão
-                    const validTypes = ['users', 'operations', 'commissions', 'audit'];
-                    if (!validTypes.includes(type)) {
-                        return res.json({
-                            type: 'ERROR',
-                            message: `Tipo de relatório inválido. Tipos disponíveis: ${validTypes.join(', ')} ou IDs de relatórios customizados.`
-                        });
-                    }
-                }
-                
-                // Helper para normalizar datas
-                const normalizeDate = (dateStr) => {
-                    if (!dateStr || dateStr.trim() === '') return null;
-                    
-                    // Formato MM/YYYY - converter para primeiro dia do mês
-                    const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
-                    if (monthYearMatch) {
-                        const month = parseInt(monthYearMatch[1]);
-                        const year = parseInt(monthYearMatch[2]);
-                        if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
-                            return `${year}-${String(month).padStart(2, '0')}-01`;
-                        }
-                    }
-                    
-                    // Formato DD/MM/YYYY
-                    const brDateMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-                    if (brDateMatch) {
-                        const day = parseInt(brDateMatch[1]);
-                        const month = parseInt(brDateMatch[2]);
-                        const year = parseInt(brDateMatch[3]);
-                        if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
-                            return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-                        }
-                    }
-                    
-                    // Formato YYYY-MM-DD (já está correto)
-                    const isoMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-                    if (isoMatch) {
-                        return dateStr;
-                    }
-                    
-                    // Tentar usar dateHelper para parsear datas em linguagem natural
-                    const parsedDate = dateHelper.parseNaturalDate(dateStr);
-                    if (parsedDate) {
-                        return dateHelper.toPostgresDate(parsedDate);
-                    }
-                    
-                    return null;
-                };
-                
-                const normalizeDateTo = (dateStr) => {
-                    if (!dateStr || dateStr.trim() === '') return null;
-                    
-                    // Formato MM/YYYY - converter para último dia do mês
-                    const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
-                    if (monthYearMatch) {
-                        const month = parseInt(monthYearMatch[1]);
-                        const year = parseInt(monthYearMatch[2]);
-                        if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
-                            // Último dia do mês
-                            const lastDay = new Date(year, month, 0).getDate();
-                            return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-                        }
-                    }
-                    
-                    // Para outros formatos, usar a mesma lógica de normalizeDate
-                    return normalizeDate(dateStr);
-                };
-                
-                // Normalizar datas dos filtros
-                const normalizedFilters = {
-                    ...filters,
-                    dateFrom: normalizeDate(filters.dateFrom),
-                    dateTo: normalizeDateTo(filters.dateTo)
-                };
-                
-                // Gerar relatório diretamente (mesma lógica do endpoint)
-                let query;
-                let params = [];
-                let paramCount = 1;
-                
-                if (type === 'users') {
-                    query = `
-                        SELECT 
-                            u.id_usuario as "ID",
-                            u.str_descricao as "Nome",
-                            u.str_login as "Login",
-                            u.email as "Email",
-                            u.str_cpf as "CPF",
-                            CASE 
-                                WHEN u.str_ativo = 'E' THEN 'INATIVO'
-                                WHEN u.bloqueado = true THEN 'BLOQUEADO'
-                                ELSE 'ATIVO'
-                            END as "Status",
-                            o.str_descricao as "Operação",
-                            g.str_descricao as "Grupo",
-                            u.dh_edita as "Última Modificação"
-                        FROM tb_usuario u
-                        LEFT JOIN tb_operacao o ON u.id_operacao = o.id_operacao
-                        LEFT JOIN tb_grupo g ON u.id_grupo = g.id_grupo
-                        WHERE 1=1
-                    `;
-                    
-                    if (filters.status) {
-                        if (filters.status === 'ATIVO') {
-                            query += ` AND u.str_ativo = 'A' AND u.bloqueado = false`;
-                        } else if (filters.status === 'BLOQUEADO') {
-                            query += ` AND u.bloqueado = true AND u.str_ativo = 'A'`;
-                        } else if (filters.status === 'INATIVO') {
-                            query += ` AND u.str_ativo = 'E'`;
-                        }
-                    }
-                    
-                    if (filters.operation) {
-                        query += ` AND o.str_descricao ILIKE $${paramCount}`;
-                        params.push(`%${filters.operation}%`);
-                        paramCount++;
-                    }
-                    
-                    if (normalizedFilters.dateFrom) {
-                        query += ` AND u.dh_edita >= $${paramCount}`;
-                        params.push(normalizedFilters.dateFrom);
-                        paramCount++;
-                    }
-                    
-                    if (normalizedFilters.dateTo) {
-                        query += ` AND u.dh_edita <= $${paramCount}`;
-                        params.push(normalizedFilters.dateTo);
-                        paramCount++;
-                    }
-                    
-                    query += ` ORDER BY u.dh_edita DESC`;
-                } else if (type === 'operations') {
-                    query = `
-                        SELECT 
-                            o.id_operacao as "ID",
-                            o.str_descricao as "Operação",
-                            o.str_documento as "CNPJ",
-                            COUNT(u.id_usuario) as "Total Usuários",
-                            COUNT(CASE WHEN u.bloqueado = false AND u.str_ativo = 'A' THEN 1 END) as "Usuários Ativos",
-                            COUNT(CASE WHEN u.bloqueado = true AND u.str_ativo = 'A' THEN 1 END) as "Usuários Bloqueados"
-                        FROM tb_operacao o
-                        LEFT JOIN tb_usuario u ON o.id_operacao = u.id_operacao AND u.str_ativo = 'A'
-                        WHERE o.str_ativo = 'A'
-                        GROUP BY o.id_operacao, o.str_descricao, o.str_documento
-                        ORDER BY "Total Usuários" DESC
-                    `;
-                } else if (type === 'commissions') {
-                    query = `
-                        SELECT 
-                            ec.id_extrato as "ID",
-                            e.str_descricao as "Entidade",
-                            ec.n_valor as "Valor Bruto",
-                            ec.n_valor_liquido as "Valor Líquido",
-                            ec.n_valor_ir as "IR",
-                            ec.n_valor_iss as "ISS",
-                            CASE WHEN ec.bloqueado THEN 'BLOQUEADO' ELSE 'LIBERADO' END as "Status",
-                            ec.dh_inclui as "Data Inclusão",
-                            ec.dh_pago as "Data Pagamento"
-                        FROM tb_extrato_comissao ec
-                        LEFT JOIN tb_entidade e ON ec.id_entidade = e.id_entidade
-                        WHERE 1=1
-                    `;
-                    
-                    if (normalizedFilters.dateFrom) {
-                        query += ` AND ec.dh_inclui >= $${paramCount}`;
-                        params.push(normalizedFilters.dateFrom);
-                        paramCount++;
-                    }
-                    
-                    if (normalizedFilters.dateTo) {
-                        query += ` AND ec.dh_inclui <= $${paramCount}`;
-                        params.push(normalizedFilters.dateTo);
-                        paramCount++;
-                    }
-                    
-                    query += ` ORDER BY ec.dh_inclui DESC`;
-                } else if (type === 'audit') {
-                    query = `
-                        SELECT 
-                            id as "ID",
-                            action_type as "Tipo de Ação",
-                            target_user_id as "ID Usuário",
-                            details::text as "Detalhes",
-                            created_at as "Data/Hora"
-                        FROM audit_logs
-                        WHERE 1=1
-                    `;
-                    
-                    if (normalizedFilters.dateFrom) {
-                        query += ` AND created_at >= $${paramCount}`;
-                        params.push(normalizedFilters.dateFrom);
-                        paramCount++;
-                    }
-                    
-                    if (normalizedFilters.dateTo) {
-                        query += ` AND created_at <= $${paramCount}`;
-                        params.push(normalizedFilters.dateTo);
-                        paramCount++;
-                    }
-                    
-                    query += ` ORDER BY created_at DESC LIMIT 1000`;
-                } else if (customReport) {
-                    // Relatório customizado - usar SQL fornecido
-                    query = customReport.sqlQuery;
-                    // Não aplicar filtros automáticos para relatórios customizados
-                    // (o SQL já deve incluir os filtros necessários)
-                }
-                
-                const result = await db.query(query, params);
-                
-                if (result.rows.length === 0) {
-                    return res.json({
-                        type: 'ERROR',
-                        message: 'Nenhum dado encontrado para o relatório com os filtros especificados.'
-                    });
-                }
-                
-                const reportTypeNames = {
-                    users: 'Usuários',
-                    operations: 'Operações',
-                    commissions: 'Comissões',
-                    audit: 'Auditoria'
-                };
-                
-                // Construir URL para download do relatório (usar datas normalizadas)
-                const filterParams = new URLSearchParams();
-                if (filters.status) filterParams.append('status', filters.status);
-                if (filters.operation) filterParams.append('operation', filters.operation);
-                if (normalizedFilters.dateFrom) filterParams.append('dateFrom', normalizedFilters.dateFrom);
-                if (normalizedFilters.dateTo) filterParams.append('dateTo', normalizedFilters.dateTo);
-                
-                const reportUrl = `/api/reports/generate?type=${type}&${filterParams.toString()}`;
-                
-                // Criar mensagem de confirmação
-                let confirmationMessage = `Deseja baixar o relatório de ${reportTypeNames[type]} em formato CSV?\n\n`;
-                confirmationMessage += `📊 Tipo: ${reportTypeNames[type]}\n`;
-                confirmationMessage += `📈 Registros encontrados: ${result.rows.length}\n`;
-                
-                if (filters.status) {
-                    confirmationMessage += `🔹 Status: ${filters.status}\n`;
-                }
-                if (filters.operation) {
-                    confirmationMessage += `🔹 Operação: ${filters.operation}\n`;
-                }
-                if (normalizedFilters.dateFrom || normalizedFilters.dateTo) {
-                    confirmationMessage += `🔹 Período: ${normalizedFilters.dateFrom || 'início'} até ${normalizedFilters.dateTo || 'fim'}\n`;
-                }
-                
-                // Armazenar filtros normalizados para uso posterior
-                const filtersToStore = {
-                    ...filters,
-                    dateFrom: normalizedFilters.dateFrom,
-                    dateTo: normalizedFilters.dateTo
-                };
-                
-                // Armazenar ação pendente para confirmação
-                const token = storePendingAction({
-                    action: 'generateReport',
-                    reportType: type,
-                    filters: filtersToStore,
-                    reportUrl: reportUrl,
-                    rowCount: result.rows.length,
-                    requestedBy: req.currentUserId
-                });
-                
-                return res.json({
-                    type: 'CONFIRMATION_REQUIRED',
-                    message: confirmationMessage,
-                    confirmationToken: token
-                });
-            }
-
             // Handle queryAuditLogs
             if (fnName === 'queryAuditLogs') {
                 const { action_type, target_user_id, limit = 10, action } = args;
@@ -2410,6 +2446,376 @@ app.post('/api/chat', async (req, res) => {
                     message: `Isso afetará ${count} usuários da empresa "${company}". Tem certeza?`,
                     confirmationToken: token,
                     affectedCount: count
+                });
+            }
+
+            // Handle generateReport
+            if (fnName === 'generateReport') {
+                const { type, filters = {} } = args;
+                
+                if (!type) {
+                    return res.json({
+                        type: 'ERROR',
+                        message: 'Tipo de relatório é obrigatório.'
+                    });
+                }
+                
+                // Verificar se é um relatório customizado
+                let customReport = null;
+                if (typeof type === 'string' && type.startsWith('custom_')) {
+                    customReport = getCustomReport(type);
+                    if (!customReport) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: `Relatório customizado "${type}" não encontrado.`
+                        });
+                    }
+                } else {
+                    // Validar tipo padrão
+                    const validTypes = ['users', 'operations', 'commissions', 'audit'];
+                    if (!validTypes.includes(type)) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: `Tipo de relatório inválido. Tipos disponíveis: ${validTypes.join(', ')} ou IDs de relatórios customizados (que começam com "custom_").`
+                        });
+                    }
+                }
+                
+                // Helper para normalizar datas
+                const normalizeDate = (dateStr) => {
+                    if (!dateStr || dateStr.trim() === '') return null;
+                    
+                    const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
+                    if (monthYearMatch) {
+                        const month = parseInt(monthYearMatch[1]);
+                        const year = parseInt(monthYearMatch[2]);
+                        if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                            return `${year}-${String(month).padStart(2, '0')}-01`;
+                        }
+                    }
+                    
+                    const brDateMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                    if (brDateMatch) {
+                        const day = parseInt(brDateMatch[1]);
+                        const month = parseInt(brDateMatch[2]);
+                        const year = parseInt(brDateMatch[3]);
+                        if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                            return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                        }
+                    }
+                    
+                    const isoMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+                    if (isoMatch) {
+                        return dateStr;
+                    }
+                    
+                    return null;
+                };
+                
+                const normalizeDateTo = (dateStr) => {
+                    if (!dateStr || dateStr.trim() === '') return null;
+                    
+                    const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
+                    if (monthYearMatch) {
+                        const month = parseInt(monthYearMatch[1]);
+                        const year = parseInt(monthYearMatch[2]);
+                        if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                            const lastDay = new Date(year, month, 0).getDate();
+                            return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+                        }
+                    }
+                    
+                    return normalizeDate(dateStr);
+                };
+                
+                const normalizedFilters = {
+                    ...filters,
+                    dateFrom: normalizeDate(filters.dateFrom),
+                    dateTo: normalizeDateTo(filters.dateTo)
+                };
+                
+                let query;
+                let params = [];
+                let paramCount = 1;
+                
+                if (customReport) {
+                    query = customReport.sqlQuery;
+                } else if (type === 'users') {
+                    query = `
+                        SELECT 
+                            u.id_usuario as "ID",
+                            u.str_descricao as "Nome",
+                            u.str_login as "Login",
+                            u.email as "Email",
+                            u.str_cpf as "CPF",
+                            CASE 
+                                WHEN u.str_ativo = 'E' THEN 'INATIVO'
+                                WHEN u.bloqueado = true THEN 'BLOQUEADO'
+                                ELSE 'ATIVO'
+                            END as "Status",
+                            o.str_descricao as "Operação",
+                            g.str_descricao as "Grupo",
+                            u.dh_edita as "Última Modificação"
+                        FROM tb_usuario u
+                        LEFT JOIN tb_operacao o ON u.id_operacao = o.id_operacao
+                        LEFT JOIN tb_grupo g ON u.id_grupo = g.id_grupo
+                        WHERE 1=1
+                    `;
+                    
+                    if (normalizedFilters.status) {
+                        if (normalizedFilters.status === 'ATIVO') {
+                            query += ` AND u.str_ativo = 'A' AND u.bloqueado = false`;
+                        } else if (normalizedFilters.status === 'BLOQUEADO') {
+                            query += ` AND u.bloqueado = true AND u.str_ativo = 'A'`;
+                        } else if (normalizedFilters.status === 'INATIVO') {
+                            query += ` AND u.str_ativo = 'E'`;
+                        }
+                    }
+                    
+                    if (normalizedFilters.operation) {
+                        query += ` AND UPPER(o.str_descricao) = UPPER($${paramCount})`;
+                        params.push(normalizedFilters.operation);
+                        paramCount++;
+                    }
+                    
+                    if (normalizedFilters.dateFrom) {
+                        query += ` AND u.dh_edita >= $${paramCount}`;
+                        params.push(normalizedFilters.dateFrom);
+                        paramCount++;
+                    }
+                    
+                    if (normalizedFilters.dateTo) {
+                        query += ` AND u.dh_edita <= $${paramCount}`;
+                        params.push(normalizedFilters.dateTo);
+                        paramCount++;
+                    }
+                    
+                    query += ` ORDER BY u.dh_edita DESC`;
+                } else if (type === 'operations') {
+                    query = `
+                        SELECT 
+                            o.id_operacao as "ID",
+                            o.str_descricao as "Operação",
+                            o.str_documento as "CNPJ",
+                            COUNT(u.id_usuario) as "Total Usuários",
+                            COUNT(CASE WHEN u.bloqueado = false AND u.str_ativo = 'A' THEN 1 END) as "Usuários Ativos",
+                            COUNT(CASE WHEN u.bloqueado = true AND u.str_ativo = 'A' THEN 1 END) as "Usuários Bloqueados"
+                        FROM tb_operacao o
+                        LEFT JOIN tb_usuario u ON o.id_operacao = u.id_operacao AND u.str_ativo = 'A'
+                        WHERE o.str_ativo = 'A'
+                        GROUP BY o.id_operacao, o.str_descricao, o.str_documento
+                        ORDER BY "Total Usuários" DESC
+                    `;
+                } else if (type === 'commissions') {
+                    query = `
+                        SELECT 
+                            ec.id_extrato as "ID",
+                            e.str_descricao as "Entidade",
+                            ec.n_valor as "Valor Bruto",
+                            ec.n_valor_liquido as "Valor Líquido",
+                            ec.n_valor_ir as "IR",
+                            ec.n_valor_iss as "ISS",
+                            CASE WHEN ec.bloqueado THEN 'BLOQUEADO' ELSE 'LIBERADO' END as "Status",
+                            ec.dh_inclui as "Data Inclusão",
+                            ec.dh_pago as "Data Pagamento"
+                        FROM tb_extrato_comissao ec
+                        LEFT JOIN tb_entidade e ON ec.id_entidade = e.id_entidade
+                        WHERE 1=1
+                    `;
+                    
+                    if (normalizedFilters.dateFrom) {
+                        query += ` AND ec.dh_inclui >= $${paramCount}`;
+                        params.push(normalizedFilters.dateFrom);
+                        paramCount++;
+                    }
+                    
+                    if (normalizedFilters.dateTo) {
+                        query += ` AND ec.dh_inclui <= $${paramCount}`;
+                        params.push(normalizedFilters.dateTo);
+                        paramCount++;
+                    }
+                    
+                    query += ` ORDER BY ec.dh_inclui DESC`;
+                } else if (type === 'audit') {
+                    query = `
+                        SELECT 
+                            id as "ID",
+                            action_type as "Tipo de Ação",
+                            target_user_id as "ID Usuário",
+                            details::text as "Detalhes",
+                            created_at as "Data/Hora"
+                        FROM audit_logs
+                        WHERE 1=1
+                    `;
+                    
+                    if (normalizedFilters.dateFrom) {
+                        query += ` AND created_at >= $${paramCount}`;
+                        params.push(normalizedFilters.dateFrom);
+                        paramCount++;
+                    }
+                    
+                    if (normalizedFilters.dateTo) {
+                        query += ` AND created_at <= $${paramCount}`;
+                        params.push(normalizedFilters.dateTo);
+                        paramCount++;
+                    }
+                    
+                    query += ` ORDER BY created_at DESC LIMIT 1000`;
+                }
+                
+                const result = await db.query(query, params);
+                
+                if (result.rows.length === 0) {
+                    return res.json({
+                        type: 'ERROR',
+                        message: 'Nenhum dado encontrado para o relatório com os filtros especificados.'
+                    });
+                }
+                
+                const reportTypeNames = {
+                    users: 'Usuários',
+                    operations: 'Operações',
+                    commissions: 'Comissões',
+                    audit: 'Auditoria',
+                    [type]: customReport ? customReport.name : type
+                };
+                
+                // Construir URL para download do relatório
+                const filterParams = new URLSearchParams();
+                if (normalizedFilters.status) filterParams.append('status', normalizedFilters.status);
+                if (normalizedFilters.operation) filterParams.append('operation', normalizedFilters.operation);
+                if (normalizedFilters.dateFrom) filterParams.append('dateFrom', normalizedFilters.dateFrom);
+                if (normalizedFilters.dateTo) filterParams.append('dateTo', normalizedFilters.dateTo);
+                
+                const reportUrl = `/api/reports/generate?type=${type}&${filterParams.toString()}`;
+                
+                // Criar mensagem de confirmação
+                let confirmationMessage = `Deseja baixar o relatório de ${reportTypeNames[type]} em formato CSV?\n\n`;
+                confirmationMessage += `📊 Tipo: ${reportTypeNames[type]}\n`;
+                confirmationMessage += `📈 Registros encontrados: ${result.rows.length}\n`;
+                
+                if (normalizedFilters.status) {
+                    confirmationMessage += `🔹 Status: ${normalizedFilters.status}\n`;
+                }
+                if (normalizedFilters.operation) {
+                    confirmationMessage += `🔹 Operação: ${normalizedFilters.operation}\n`;
+                }
+                if (normalizedFilters.dateFrom || normalizedFilters.dateTo) {
+                    confirmationMessage += `🔹 Período: ${normalizedFilters.dateFrom || 'início'} até ${normalizedFilters.dateTo || 'fim'}\n`;
+                }
+                
+                // Armazenar ação pendente para confirmação
+                const token = storePendingAction({
+                    action: 'generateReport',
+                    reportType: type,
+                    filters: normalizedFilters,
+                    reportUrl: reportUrl,
+                    reportName: reportTypeNames[type],
+                    rowCount: result.rows.length,
+                    requestedBy: req.currentUserId
+                });
+                
+                return res.json({
+                    type: 'CONFIRMATION_REQUIRED',
+                    message: confirmationMessage,
+                    confirmationToken: token,
+                    affectedCount: result.rows.length
+                });
+            }
+
+            // Handle createCustomReport
+            if (fnName === 'createCustomReport') {
+                const { name, description, sqlQuery, columns } = args;
+                
+                if (!name || !description) {
+                    return res.json({
+                        type: 'ERROR',
+                        message: 'Nome e descrição são obrigatórios para criar um relatório customizado.'
+                    });
+                }
+                
+                let finalSqlQuery = sqlQuery;
+                
+                // Se não foi fornecido SQL, gerar usando o sqlGenerator (mesmo processo de consulta)
+                if (!finalSqlQuery) {
+                    try {
+                        console.log('[CustomReport] Gerando SQL usando sqlGenerator...');
+                        // Usar a descrição como pergunta para gerar o SQL
+                        const question = `Criar um relatório que mostre: ${description}`;
+                        const sqlResult = await gerarSQLCompleto(question);
+                        finalSqlQuery = sqlResult.sql;
+                        console.log('[CustomReport] SQL gerado com sucesso usando', sqlResult.tabelasSelecionadas.length, 'tabela(s)');
+                    } catch (sqlGenError) {
+                        console.error('[CustomReport] Erro ao gerar SQL:', sqlGenError.message);
+                        return res.json({
+                            type: 'ERROR',
+                            message: `Erro ao gerar SQL para o relatório: ${sqlGenError.message}. Por favor, seja mais específico na descrição do relatório.`
+                        });
+                    }
+                }
+                
+                // Validar que o SQL é um SELECT
+                const sqlTrimmed = finalSqlQuery.trim().toUpperCase();
+                if (!sqlTrimmed.startsWith('SELECT')) {
+                    return res.json({
+                        type: 'ERROR',
+                        message: 'Apenas queries SELECT são permitidas por segurança.'
+                    });
+                }
+                
+                // Validar e testar a query SQL antes de salvar
+                try {
+                    console.log('[CustomReport] Testando query SQL antes de criar relatório...');
+                    const testResult = await db.query(finalSqlQuery);
+                    console.log('[CustomReport] Query testada com sucesso, retornou', testResult.rows.length, 'linhas');
+                } catch (testError) {
+                    console.error('[CustomReport] Erro ao testar query:', testError.message);
+                    
+                    // Extrair informações úteis do erro
+                    let errorMessage = 'Erro na query SQL: ' + testError.message;
+                    
+                    if (testError.code === '42P01') {
+                        // Tabela não encontrada
+                        const tableMatch = testError.message.match(/relation\s+"([^"]+)"\s+does not exist/i) ||
+                                         testError.message.match(/relation\s+(\w+)\s+does not exist/i);
+                        const tableName = tableMatch ? tableMatch[1] : 'desconhecida';
+                        errorMessage = `A tabela "${tableName}" não existe. Use apenas tabelas que começam com "tb_" (ex: tb_usuario, tb_entidade, tb_grupo).`;
+                    } else if (testError.code === '42703') {
+                        // Coluna não encontrada
+                        const columnMatch = testError.message.match(/column\s+"([^"]+)"\s+does not exist/i) ||
+                                          testError.message.match(/column\s+(\w+)\s+does not exist/i);
+                        const columnName = columnMatch ? columnMatch[1] : 'desconhecida';
+                        errorMessage = `A coluna "${columnName}" não existe. Verifique os nomes das colunas na tabela.`;
+                    }
+                    
+                    return res.json({
+                        type: 'ERROR',
+                        message: errorMessage + ' Por favor, corrija a query e tente novamente.'
+                    });
+                }
+                
+                // Criar o relatório customizado
+                const reportId = createCustomReport({
+                    name,
+                    description,
+                    sqlQuery: finalSqlQuery,
+                    columns: columns || [],
+                    createdBy: req.currentUserId
+                });
+                
+                // Construir links de ação
+                const actions = {
+                    viewInReports: `/reports?type=${reportId}`,
+                    preview: `/api/reports/preview`,
+                    download: `/api/reports/generate?type=${reportId}`
+                };
+                
+                return res.json({
+                    type: 'CUSTOM_REPORT_CREATED',
+                    message: `✅ Relatório customizado "${name}" criado com sucesso!\n\n📊 Você pode:\n- Ver na tela de relatórios\n- Visualizar preview dos dados\n- Baixar em CSV`,
+                    reportId: reportId,
+                    reportName: name,
+                    actions: actions
                 });
             }
         }
@@ -2554,33 +2960,14 @@ app.post('/api/action/confirm', async (req, res) => {
         }
 
         if (pendingAction.action === 'generateReport') {
-            const { reportType, reportUrl, rowCount } = pendingAction;
-            
-            const reportTypeNames = {
-                users: 'Usuários',
-                operations: 'Operações',
-                commissions: 'Comissões',
-                audit: 'Auditoria'
-            };
-            
-            // Registrar auditoria
-            const auditDbId = await createAuditLog('GENERATE_REPORT', null, {
-                performedBy,
-                reportType: reportType,
-                filters: pendingAction.filters,
-                rowCount: rowCount
-            });
-            const auditLabel = formatAuditId(auditDbId);
-            
             deletePendingAction(confirmationToken);
-            
+
             return res.json({
                 type: 'REPORT_READY',
-                message: `Relatório de ${reportTypeNames[reportType]} gerado com sucesso! ${rowCount} registro(s) encontrado(s). O download será iniciado automaticamente.`,
-                reportUrl: reportUrl,
-                reportType: reportType,
-                rowCount: rowCount,
-                auditId: auditLabel
+                message: `Relatório "${pendingAction.reportName}" pronto para download!`,
+                reportUrl: pendingAction.reportUrl,
+                reportType: pendingAction.reportType,
+                rowCount: pendingAction.rowCount
             });
         }
 
@@ -2649,33 +3036,38 @@ app.post('/api/companies/reset', async (req, res) => {
 });
 */
 
-// ============================================
-// REPORTS ENDPOINTS
-// ============================================
-
-// POST /api/reports/generate - Generate CSV report
-// GET /api/reports/generate - Generate CSV report (aceita query params para download direto)
-app.get('/api/reports/generate', async (req, res) => {
+// GET /api/reports/custom - Listar todos os relatórios customizados
+app.get('/api/reports/custom', async (req, res) => {
     try {
-        const { type } = req.query;
+        const reports = getAllCustomReports();
+        res.json(reports);
+    } catch (error) {
+        console.error('Erro ao listar relatórios customizados:', error);
+        res.status(500).json({ error: 'Erro ao listar relatórios customizados' });
+    }
+});
+
+// POST /api/reports/preview - Visualizar preview de um relatório
+app.post('/api/reports/preview', async (req, res) => {
+    try {
+        const { type, filters = {} } = req.body;
+        
+        console.log('[Preview] Recebido request:', { type, filters });
         
         if (!type) {
-            return res.status(400).json({ error: 'Tipo de relatório é obrigatório' });
+            return res.status(400).json({ error: 'Tipo de relatório é obrigatório.' });
         }
         
         // Verificar se é um relatório customizado
         let customReport = null;
-        if (type.startsWith('custom_')) {
+        if (typeof type === 'string' && type.startsWith('custom_')) {
+            console.log('[Preview] Buscando relatório customizado:', type);
             customReport = getCustomReport(type);
             if (!customReport) {
+                console.error('[Preview] Relatório customizado não encontrado:', type);
                 return res.status(404).json({ error: `Relatório customizado "${type}" não encontrado.` });
             }
-        } else {
-            // Validar tipo padrão
-            const validTypes = ['users', 'operations', 'commissions', 'audit'];
-            if (!validTypes.includes(type)) {
-                return res.status(400).json({ error: `Tipo de relatório inválido. Tipos disponíveis: ${validTypes.join(', ')} ou IDs de relatórios customizados.` });
-            }
+            console.log('[Preview] Relatório customizado encontrado:', customReport.name);
         }
         
         // Helper para normalizar datas
@@ -2709,12 +3101,6 @@ app.get('/api/reports/generate', async (req, res) => {
                 return dateStr;
             }
             
-            // Tentar usar dateHelper para parsear datas em linguagem natural
-            const parsedDate = dateHelper.parseNaturalDate(dateStr);
-            if (parsedDate) {
-                return dateHelper.toPostgresDate(parsedDate);
-            }
-            
             return null;
         };
         
@@ -2727,28 +3113,367 @@ app.get('/api/reports/generate', async (req, res) => {
                 const month = parseInt(monthYearMatch[1]);
                 const year = parseInt(monthYearMatch[2]);
                 if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
-                    // Último dia do mês
                     const lastDay = new Date(year, month, 0).getDate();
                     return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
                 }
             }
             
-            // Para outros formatos, usar a mesma lógica de normalizeDate
             return normalizeDate(dateStr);
         };
         
-        const filters = {
-            status: req.query.status || '',
-            operation: req.query.operation || '',
-            dateFrom: normalizeDate(req.query.dateFrom || ''),
-            dateTo: normalizeDateTo(req.query.dateTo || '')
+        const normalizedFilters = {
+            ...filters,
+            dateFrom: normalizeDate(filters.dateFrom),
+            dateTo: normalizeDateTo(filters.dateTo)
         };
         
         let query;
         let params = [];
         let paramCount = 1;
         
-        if (type === 'users') {
+        if (customReport) {
+            // Relatório customizado - usar SQL fornecido
+            query = customReport.sqlQuery;
+            
+            // Validar se a query existe e não está vazia
+            if (!query || typeof query !== 'string' || query.trim() === '') {
+                return res.status(400).json({ error: 'Query SQL do relatório customizado está vazia ou inválida.' });
+            }
+            
+            // Validar que é uma query SELECT (segurança)
+            const queryUpper = query.trim().toUpperCase();
+            if (!queryUpper.startsWith('SELECT')) {
+                return res.status(400).json({ error: 'Apenas queries SELECT são permitidas por segurança.' });
+            }
+            
+            // Verificar se há parâmetros na query ($1, $2, etc.)
+            const paramMatches = query.match(/\$\d+/g);
+            if (paramMatches && paramMatches.length > 0) {
+                console.warn('[Preview] Query customizada contém parâmetros que não serão fornecidos:', paramMatches);
+                // A query será executada e, se falhar, o tratamento de erros vai capturar
+                // e retornar uma mensagem clara ao usuário
+            }
+            
+            // Não aplicar filtros automáticos para relatórios customizados
+            // Mas limpar params para evitar problemas com parâmetros não utilizados
+            params = [];
+        } else if (type === 'users') {
+            query = `
+                SELECT 
+                    u.id_usuario as "ID",
+                    u.str_descricao as "Nome",
+                    u.str_login as "Login",
+                    u.email as "Email",
+                    u.str_cpf as "CPF",
+                    CASE 
+                        WHEN u.str_ativo = 'E' THEN 'INATIVO'
+                        WHEN u.bloqueado = true THEN 'BLOQUEADO'
+                        ELSE 'ATIVO'
+                    END as "Status",
+                    o.str_descricao as "Operação",
+                    g.str_descricao as "Grupo",
+                    u.dh_edita as "Última Modificação"
+                FROM tb_usuario u
+                LEFT JOIN tb_operacao o ON u.id_operacao = o.id_operacao
+                LEFT JOIN tb_grupo g ON u.id_grupo = g.id_grupo
+                WHERE 1=1
+            `;
+            
+            if (normalizedFilters.status) {
+                if (normalizedFilters.status === 'ATIVO') {
+                    query += ` AND u.str_ativo = 'A' AND u.bloqueado = false`;
+                } else if (normalizedFilters.status === 'BLOQUEADO') {
+                    query += ` AND u.bloqueado = true AND u.str_ativo = 'A'`;
+                } else if (normalizedFilters.status === 'INATIVO') {
+                    query += ` AND u.str_ativo = 'E'`;
+                }
+            }
+            
+            if (normalizedFilters.operation) {
+                query += ` AND UPPER(o.str_descricao) = UPPER($${paramCount})`;
+                params.push(normalizedFilters.operation);
+                paramCount++;
+            }
+            
+            if (normalizedFilters.dateFrom) {
+                query += ` AND u.dh_edita >= $${paramCount}`;
+                params.push(normalizedFilters.dateFrom);
+                paramCount++;
+            }
+            
+            if (normalizedFilters.dateTo) {
+                query += ` AND u.dh_edita <= $${paramCount}`;
+                params.push(normalizedFilters.dateTo);
+                paramCount++;
+            }
+            
+            query += ` ORDER BY u.dh_edita DESC`;
+        } else if (type === 'operations') {
+            query = `
+                SELECT 
+                    o.id_operacao as "ID",
+                    o.str_descricao as "Operação",
+                    o.str_documento as "CNPJ",
+                    COUNT(u.id_usuario) as "Total Usuários",
+                    COUNT(CASE WHEN u.bloqueado = false AND u.str_ativo = 'A' THEN 1 END) as "Usuários Ativos",
+                    COUNT(CASE WHEN u.bloqueado = true AND u.str_ativo = 'A' THEN 1 END) as "Usuários Bloqueados"
+                FROM tb_operacao o
+                LEFT JOIN tb_usuario u ON o.id_operacao = u.id_operacao AND u.str_ativo = 'A'
+                WHERE o.str_ativo = 'A'
+                GROUP BY o.id_operacao, o.str_descricao, o.str_documento
+                ORDER BY "Total Usuários" DESC
+            `;
+        } else if (type === 'commissions') {
+            query = `
+                SELECT 
+                    ec.id_extrato as "ID",
+                    e.str_descricao as "Entidade",
+                    ec.n_valor as "Valor Bruto",
+                    ec.n_valor_liquido as "Valor Líquido",
+                    ec.n_valor_ir as "IR",
+                    ec.n_valor_iss as "ISS",
+                    CASE WHEN ec.bloqueado THEN 'BLOQUEADO' ELSE 'LIBERADO' END as "Status",
+                    ec.dh_inclui as "Data Inclusão",
+                    ec.dh_pago as "Data Pagamento"
+                FROM tb_extrato_comissao ec
+                LEFT JOIN tb_entidade e ON ec.id_entidade = e.id_entidade
+                WHERE 1=1
+            `;
+            
+            if (normalizedFilters.dateFrom) {
+                query += ` AND ec.dh_inclui >= $${paramCount}`;
+                params.push(normalizedFilters.dateFrom);
+                paramCount++;
+            }
+            
+            if (normalizedFilters.dateTo) {
+                query += ` AND ec.dh_inclui <= $${paramCount}`;
+                params.push(normalizedFilters.dateTo);
+                paramCount++;
+            }
+            
+            query += ` ORDER BY ec.dh_inclui DESC`;
+        } else if (type === 'audit') {
+            query = `
+                SELECT 
+                    id as "ID",
+                    action_type as "Tipo de Ação",
+                    target_user_id as "ID Usuário",
+                    details::text as "Detalhes",
+                    created_at as "Data/Hora"
+                FROM audit_logs
+                WHERE 1=1
+            `;
+            
+            if (normalizedFilters.dateFrom) {
+                query += ` AND created_at >= $${paramCount}`;
+                params.push(normalizedFilters.dateFrom);
+                paramCount++;
+            }
+            
+            if (normalizedFilters.dateTo) {
+                query += ` AND created_at <= $${paramCount}`;
+                params.push(normalizedFilters.dateTo);
+                paramCount++;
+            }
+            
+            query += ` ORDER BY created_at DESC LIMIT 1000`;
+        } else {
+            return res.status(400).json({ error: `Tipo de relatório inválido: ${type}` });
+        }
+        
+        // Validar query antes de executar
+        if (!query || query.trim() === '') {
+            return res.status(400).json({ error: 'Query SQL não pode estar vazia.' });
+        }
+        
+        console.log('[Preview] Executando query:', query.substring(0, 200) + (query.length > 200 ? '...' : ''));
+        console.log('[Preview] Parâmetros:', params);
+        console.log('[Preview] Tipo de relatório:', type);
+        
+        let result;
+        try {
+            result = await db.query(query, params);
+        } catch (dbError) {
+            // Erro específico do PostgreSQL
+            console.error('[Preview] Erro do PostgreSQL:', dbError.message);
+            console.error('[Preview] Código do erro:', dbError.code);
+            console.error('[Preview] Detalhes:', dbError.detail);
+            console.error('[Preview] Query que falhou:', query.substring(0, 500));
+            
+            // Verificar se é erro de tabela não encontrada
+            if (dbError.code === '42P01' || dbError.message.includes('does not exist') || dbError.message.includes('não existe')) {
+                // Extrair nome da tabela do erro - múltiplos padrões
+                let tableName = 'desconhecida';
+                
+                // Padrão 1: relation "nome_tabela" does not exist
+                const pattern1 = dbError.message.match(/relation\s+"([^"]+)"\s+does not exist/i);
+                if (pattern1) {
+                    tableName = pattern1[1];
+                } else {
+                    // Padrão 2: relation nome_tabela does not exist (sem aspas)
+                    const pattern2 = dbError.message.match(/relation\s+(\w+)\s+does not exist/i);
+                    if (pattern2) {
+                        tableName = pattern2[1];
+                    } else {
+                        // Padrão 3: tabela "nome_tabela" não existe
+                        const pattern3 = dbError.message.match(/tabela\s+"([^"]+)"\s+não existe/i);
+                        if (pattern3) {
+                            tableName = pattern3[1];
+                        } else {
+                            // Padrão 4: qualquer palavra após "relation" ou "tabela"
+                            const pattern4 = dbError.message.match(/(?:relation|tabela)\s+["']?(\w+)/i);
+                            if (pattern4) {
+                                tableName = pattern4[1];
+                            }
+                        }
+                    }
+                }
+                
+                // Se ainda não encontrou, tentar extrair da query
+                if (tableName === 'desconhecida' && query) {
+                    const fromMatch = query.match(/FROM\s+(\w+)/i);
+                    if (fromMatch) {
+                        tableName = fromMatch[1];
+                    }
+                }
+                
+                return res.status(400).json({ 
+                    error: `A tabela "${tableName}" não existe no banco de dados. Verifique se o nome da tabela está correto.`,
+                    message: dbError.message,
+                    hint: 'Tabelas devem começar com o prefixo "tb_" (ex: tb_entidade, tb_usuario). Verifique também se tabelas relacionadas (tb_entidade_email, tb_entidade_telefone) existem.',
+                    query: query.substring(0, 200) // Mostrar parte da query para debug
+                });
+            }
+            
+            // Verificar se é erro de parâmetros não fornecidos
+            if (dbError.code === '42P02' || dbError.message.includes('parameter') || dbError.message.includes('$')) {
+                return res.status(400).json({ 
+                    error: 'A query SQL contém parâmetros que não foram fornecidos. Relatórios customizados não podem usar parâmetros ($1, $2, etc.) no preview.',
+                    message: dbError.message
+                });
+            }
+            
+            // Verificar se é erro de coluna não encontrada
+            if (dbError.code === '42703' || dbError.message.includes('column') && dbError.message.includes('does not exist')) {
+                const columnMatch = dbError.message.match(/column\s+"?(\w+)"?\s+does not exist/i);
+                const columnName = columnMatch ? columnMatch[1] : 'desconhecida';
+                
+                return res.status(400).json({ 
+                    error: `A coluna "${columnName}" não existe na tabela. Verifique se o nome da coluna está correto.`,
+                    message: dbError.message
+                });
+            }
+            
+            // Outros erros do PostgreSQL
+            return res.status(400).json({
+                error: 'Erro na execução da query SQL',
+                message: dbError.message,
+                code: dbError.code
+            });
+        }
+        
+        res.json({
+            rows: result.rows,
+            count: result.rows.length
+        });
+        
+    } catch (error) {
+        console.error('[Preview] Erro ao gerar preview:', error);
+        console.error('[Preview] Stack trace:', error.stack);
+        
+        // Se já foi uma resposta HTTP, não enviar novamente
+        if (res.headersSent) {
+            return;
+        }
+        
+        res.status(500).json({ 
+            error: 'Erro ao gerar preview', 
+            message: error.message,
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
+    }
+});
+
+// GET /api/reports/generate - Gerar relatório em CSV
+app.get('/api/reports/generate', async (req, res) => {
+    try {
+        const { type, status, operation, dateFrom, dateTo } = req.query;
+        
+        if (!type) {
+            return res.status(400).json({ error: 'Tipo de relatório é obrigatório.' });
+        }
+        
+        // Verificar se é um relatório customizado
+        let customReport = null;
+        if (typeof type === 'string' && type.startsWith('custom_')) {
+            customReport = getCustomReport(type);
+            if (!customReport) {
+                return res.status(404).json({ error: `Relatório customizado "${type}" não encontrado.` });
+            }
+        }
+        
+        // Helper para normalizar datas
+        const normalizeDate = (dateStr) => {
+            if (!dateStr || dateStr.trim() === '') return null;
+            
+            const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
+            if (monthYearMatch) {
+                const month = parseInt(monthYearMatch[1]);
+                const year = parseInt(monthYearMatch[2]);
+                if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                    return `${year}-${String(month).padStart(2, '0')}-01`;
+                }
+            }
+            
+            const brDateMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (brDateMatch) {
+                const day = parseInt(brDateMatch[1]);
+                const month = parseInt(brDateMatch[2]);
+                const year = parseInt(brDateMatch[3]);
+                if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                }
+            }
+            
+            const isoMatch = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (isoMatch) {
+                return dateStr;
+            }
+            
+            return null;
+        };
+        
+        const normalizeDateTo = (dateStr) => {
+            if (!dateStr || dateStr.trim() === '') return null;
+            
+            const monthYearMatch = dateStr.match(/^(\d{1,2})\/(\d{4})$/);
+            if (monthYearMatch) {
+                const month = parseInt(monthYearMatch[1]);
+                const year = parseInt(monthYearMatch[2]);
+                if (month >= 1 && month <= 12 && year >= 1900 && year <= 2100) {
+                    const lastDay = new Date(year, month, 0).getDate();
+                    return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+                }
+            }
+            
+            return normalizeDate(dateStr);
+        };
+        
+        const filters = {
+            status,
+            operation,
+            dateFrom: normalizeDate(dateFrom),
+            dateTo: normalizeDateTo(dateTo)
+        };
+        
+        let query;
+        let params = [];
+        let paramCount = 1;
+        
+        if (customReport) {
+            query = customReport.sqlQuery;
+        } else if (type === 'users') {
             query = `
                 SELECT 
                     u.id_usuario as "ID",
@@ -2781,7 +3506,6 @@ app.get('/api/reports/generate', async (req, res) => {
             }
             
             if (filters.operation) {
-                // Comparação exata (case-insensitive) para valores do select
                 query += ` AND UPPER(o.str_descricao) = UPPER($${paramCount})`;
                 params.push(filters.operation);
                 paramCount++;
@@ -2800,11 +3524,6 @@ app.get('/api/reports/generate', async (req, res) => {
             }
             
             query += ` ORDER BY u.dh_edita DESC`;
-        } else if (customReport) {
-            // Relatório customizado - usar SQL fornecido
-            query = customReport.sqlQuery;
-            // Não aplicar filtros automáticos para relatórios customizados
-            // (o SQL já deve incluir os filtros necessários)
         } else if (type === 'operations') {
             query = `
                 SELECT 
@@ -2875,160 +3594,51 @@ app.get('/api/reports/generate', async (req, res) => {
             }
             
             query += ` ORDER BY created_at DESC LIMIT 1000`;
-        } else if (customReport) {
-            // Relatório customizado - usar SQL fornecido
-            query = customReport.sqlQuery;
-            // Não aplicar filtros automáticos para relatórios customizados
-            // (o SQL já deve incluir os filtros necessários)
         } else {
-            return res.status(400).json({ error: 'Tipo de relatório inválido' });
+            return res.status(400).json({ error: `Tipo de relatório inválido: ${type}` });
         }
         
         const result = await db.query(query, params);
         
-        // Converter para CSV
         if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Nenhum dado encontrado para o relatório' });
+            return res.status(404).json({ error: 'Nenhum dado encontrado para o relatório com os filtros especificados.' });
         }
         
-        // Cabeçalho CSV
+        // Converter para CSV
         const headers = Object.keys(result.rows[0]);
-        const csvHeader = headers.join(',');
+        const csvRows = [
+            headers.join(','),
+            ...result.rows.map(row => 
+                headers.map(header => {
+                    const value = row[header];
+                    if (value === null || value === undefined) return '';
+                    // Escapar vírgulas e aspas
+                    const stringValue = String(value);
+                    if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+                        return `"${stringValue.replace(/"/g, '""')}"`;
+                    }
+                    return stringValue;
+                }).join(',')
+            )
+        ];
         
-        // Linhas CSV
-        const csvRows = result.rows.map(row => {
-            return headers.map(header => {
-                const value = row[header];
-                // Escapar valores que contêm vírgulas ou aspas
-                if (value === null || value === undefined) return '';
-                const stringValue = String(value);
-                if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
-                    return `"${stringValue.replace(/"/g, '""')}"`;
-                }
-                return stringValue;
-            }).join(',');
-        });
-        
-        const csv = [csvHeader, ...csvRows].join('\n');
-        
-        // Adicionar BOM para Excel reconhecer UTF-8
-        const csvWithBOM = '\ufeff' + csv;
+        const csv = csvRows.join('\n');
         
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="relatorio_${type}_${new Date().toISOString().split('T')[0]}.csv"`);
-        res.send(csvWithBOM);
+        res.send('\ufeff' + csv); // BOM para Excel
+        
     } catch (error) {
         console.error('Erro ao gerar relatório:', error);
-        res.status(500).json({ error: 'Erro ao gerar relatório', details: error.message });
+        res.status(500).json({ error: 'Erro ao gerar relatório', message: error.message });
     }
 });
 
-// POST /api/reports/generate - Generate CSV report (para uso da página de relatórios)
-app.post('/api/reports/generate', async (req, res) => {
-    try {
-        const { type, filters = {} } = req.body;
-        
-        // Reutilizar a mesma lógica do GET
-        const queryParams = new URLSearchParams();
-        queryParams.append('type', type);
-        if (filters.status) queryParams.append('status', filters.status);
-        if (filters.operation) queryParams.append('operation', filters.operation);
-        if (filters.dateFrom) queryParams.append('dateFrom', filters.dateFrom);
-        if (filters.dateTo) queryParams.append('dateTo', filters.dateTo);
-        
-        // Redirecionar para o GET que faz o download
-        return res.redirect(`/api/reports/generate?${queryParams.toString()}`);
-    } catch (error) {
-        console.error('Erro ao gerar relatório:', error);
-        res.status(500).json({ error: 'Erro ao gerar relatório', details: error.message });
-    }
-});
-
-// POST /api/reports/preview - Preview report data (JSON)
-app.post('/api/reports/preview', async (req, res) => {
-    try {
-        const { type, filters = {} } = req.body;
-        
-        // Verificar se é um relatório customizado
-        let customReport = null;
-        if (type.startsWith('custom_')) {
-            customReport = getCustomReport(type);
-            if (!customReport) {
-                return res.status(404).json({ error: `Relatório customizado "${type}" não encontrado.` });
-            }
-        }
-        
-        // Mesma lógica do generate, mas retorna JSON limitado
-        let query;
-        let params = [];
-        let paramCount = 1;
-        
-        if (customReport) {
-            // Relatório customizado - usar SQL fornecido
-            query = customReport.sqlQuery;
-        } else if (type === 'users') {
-            query = `
-                SELECT 
-                    u.id_usuario as id,
-                    u.str_descricao as name,
-                    u.str_login as login,
-                    u.email,
-                    u.str_cpf as cpf,
-                    CASE 
-                        WHEN u.str_ativo = 'E' THEN 'INATIVO'
-                        WHEN u.bloqueado = true THEN 'BLOQUEADO'
-                        ELSE 'ATIVO'
-                    END as status,
-                    o.str_descricao as operation,
-                    u.dh_edita as last_modified
-                FROM tb_usuario u
-                LEFT JOIN tb_operacao o ON u.id_operacao = o.id_operacao
-                WHERE 1=1
-            `;
-            
-            if (filters.status) {
-                if (filters.status === 'ATIVO') {
-                    query += ` AND u.str_ativo = 'A' AND u.bloqueado = false`;
-                } else if (filters.status === 'BLOQUEADO') {
-                    query += ` AND u.bloqueado = true AND u.str_ativo = 'A'`;
-                } else if (filters.status === 'INATIVO') {
-                    query += ` AND u.str_ativo = 'E'`;
-                }
-            }
-            
-            if (filters.operation) {
-                // Comparação exata (case-insensitive) para valores do select
-                query += ` AND UPPER(o.str_descricao) = UPPER($${paramCount})`;
-                params.push(filters.operation);
-                paramCount++;
-            }
-            
-            if (filters.dateFrom) {
-                query += ` AND u.dh_edita >= $${paramCount}`;
-                params.push(filters.dateFrom);
-                paramCount++;
-            }
-            
-            if (filters.dateTo) {
-                query += ` AND u.dh_edita <= $${paramCount}`;
-                params.push(filters.dateTo);
-                paramCount++;
-            }
-            
-            query += ` ORDER BY u.dh_edita DESC LIMIT 50`;
-        } else {
-            // Para outros tipos, retornar contagem simples
-            return res.json({ rows: [], count: 0, message: 'Preview disponível apenas para relatório de usuários' });
-        }
-        
-        const result = await db.query(query, params);
-        res.json({ rows: result.rows, count: result.rows.length });
-    } catch (error) {
-        console.error('Erro ao visualizar relatório:', error);
-        res.status(500).json({ error: 'Erro ao visualizar relatório', details: error.message });
-    }
-});
-
-app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-});
+// Exportar app para testes
+if (require.main !== module) {
+    module.exports = app;
+} else {
+        app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+    });
+}

@@ -25,12 +25,36 @@ function App() {
                             </ProtectedRoute>
                         }>
                             <Route index element={<Navigate to="/dashboard" replace />} />
-                            <Route path="dashboard" element={<Dashboard />} />
-                            <Route path="prompt-manager" element={<PromptManager />} />
-                            <Route path="operations" element={<OperationsDashboard />} />
-                            <Route path="groups" element={<GroupsDashboard />} />
-                            <Route path="audit" element={<UserAuditReport />} />
-                            <Route path="reports" element={<Reports />} />
+                            <Route path="dashboard" element={
+                                <ProtectedRoute requiredPermission="dashboard">
+                                    <Dashboard />
+                                </ProtectedRoute>
+                            } />
+                            <Route path="prompt-manager" element={
+                                <ProtectedRoute>
+                                    <PromptManager />
+                                </ProtectedRoute>
+                            } />
+                            <Route path="operations" element={
+                                <ProtectedRoute requiredPermission="operations">
+                                    <OperationsDashboard />
+                                </ProtectedRoute>
+                            } />
+                            <Route path="groups" element={
+                                <ProtectedRoute requiredPermission="groups">
+                                    <GroupsDashboard />
+                                </ProtectedRoute>
+                            } />
+                            <Route path="audit" element={
+                                <ProtectedRoute requiredPermission="audit">
+                                    <UserAuditReport />
+                                </ProtectedRoute>
+                            } />
+                            <Route path="reports" element={
+                                <ProtectedRoute requiredPermission="reports">
+                                    <Reports />
+                                </ProtectedRoute>
+                            } />
                         </Route>
                     </Routes>
                 </BrowserRouter>

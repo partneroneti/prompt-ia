@@ -1,0 +1,54 @@
+[
+  {
+    "id": "custom_1764184915103_d0mcvf57t",
+    "name": "Relatório de Entidades com Emails e Telefones",
+    "description": "Este relatório exibirá os emails e telefones das entidades cadastradas no sistema.",
+    "sqlQuery": "SELECT e.id_entidade as \"ID\", e.str_descricao as \"Nome\", e.str_documento as \"CNPJ/CPF\", CASE WHEN e.str_ativo = 'A' THEN 'ATIVA' ELSE 'INATIVA' END as \"Status\" FROM tb_entidade e WHERE e.str_ativo = 'A' ORDER BY e.str_descricao",
+    "columns": [
+      "ID",
+      "Nome",
+      "CNPJ/CPF",
+      "Status"
+    ],
+    "filters": {},
+    "createdAt": "2025-11-26T19:21:55.103Z",
+    "createdBy": 79
+  },
+  {
+    "id": "custom_1764186263331_britdpjv2",
+    "name": "Relatório de Grupos Hierárquicos",
+    "description": "Relatório de grupos com seus níveis hierárquicos",
+    "sqlQuery": "SELECT g.id_grupo as \"ID\", g.str_descricao as \"Grupo\", g.ordem as \"Ordem\", o.str_descricao as \"Operação\", CASE WHEN g.excecao THEN 'Sim' ELSE 'Não' END as \"Exceção\", CASE WHEN g.str_ativo = 'A' THEN 'ATIVO' ELSE 'INATIVO' END as \"Status\" FROM tb_grupo g LEFT JOIN tb_operacao o ON g.id_operacao = o.id_operacao WHERE g.str_ativo = 'A' ORDER BY g.ordem, g.str_descricao",
+    "columns": [
+      "ID",
+      "Grupo",
+      "Ordem",
+      "Operação",
+      "Exceção",
+      "Status"
+    ],
+    "filters": {},
+    "createdAt": "2025-11-26T19:44:23.331Z",
+    "createdBy": 79
+  },
+  {
+    "id": "custom_1764255691454_hnknb9bh7",
+    "name": "Relatório de Usuários Inativos",
+    "description": "Relatório que lista todos os usuários inativos do sistema.",
+    "sqlQuery": "SELECT * FROM tb_usuario WHERE str_ativo = 'I';",
+    "columns": [],
+    "filters": {},
+    "createdAt": "2025-11-27T15:01:31.454Z",
+    "createdBy": 181
+  },
+  {
+    "id": "custom_1764269581485_qelui63xx",
+    "name": "Relatório de Usuários do Browser",
+    "description": "Relatório de todos os usuários do Browser",
+    "sqlQuery": "SELECT *\nFROM tb_usuario\nWHERE str_ativo = 'A';",
+    "columns": [],
+    "filters": {},
+    "createdAt": "2025-11-27T18:53:01.485Z",
+    "createdBy": 261
+  }
+]

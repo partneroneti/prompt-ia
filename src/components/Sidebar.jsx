@@ -3,20 +3,31 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { LayoutDashboard, MessageSquare, Building2, Users, FileText, LogOut, Shield, User, FileBarChart } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../context/AuthContext';
+import { usePermissions } from '../hooks/usePermissions';
 
 const Sidebar = () => {
     const location = useLocation();
     const navigate = useNavigate();
     const { user, logout, switchProfile } = useAuth();
+    const { canAccess, isMaster } = usePermissions();
 
-    const menuItems = [
-        { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
-        { path: '/operations', icon: Building2, label: 'Operações' },
-        { path: '/groups', icon: Users, label: 'Grupos' },
-        { path: '/audit', icon: FileText, label: 'Auditoria' },
-        { path: '/reports', icon: FileBarChart, label: 'Relatórios' },
-        { path: '/prompt-manager', icon: MessageSquare, label: 'Prompt Manager' },
+    // Definir menus com suas permissões
+    const allMenuItems = [
+        { path: '/', icon: LayoutDashboard, label: 'Dashboard', permission: 'dashboard' },
+        { path: '/operations', icon: Building2, label: 'Operações', permission: 'operations' },
+        { path: '/groups', icon: Users, label: 'Grupos', permission: 'groups' },
+        { path: '/audit', icon: FileText, label: 'Auditoria', permission: 'audit' },
+        { path: '/reports', icon: FileBarChart, label: 'Relatórios', permission: 'reports' },
+        { path: '/prompt-manager', icon: MessageSquare, label: 'Prompt Manager', permission: null }, // Sem permissão - acesso para todos
     ];
+
+    // Filtrar menus baseado nas permissões
+    // Prompt Manager sempre aparece (permission: null)
+    const menuItems = allMenuItems.filter(item => {
+        if (!item.permission) return true; // Sem permissão = sempre visível
+        if (isMaster()) return true; // MASTER vê tudo
+        return canAccess(item.permission); // Outros usuários verificam permissão
+    });
 
     return (
         <div className="w-64 bg-slate-900 text-white h-screen flex flex-col shadow-xl">

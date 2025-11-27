@@ -229,12 +229,46 @@ async function canPerformAction(userId, action, resource) {
         return true;
     }
 
-    // Construct role name (e.g., "USER_CREATE", "PROFILE_UPDATE")
-    const roleName = `${resource.toUpperCase()}_${action.toUpperCase()}`;
-    const hasRoleResult = await hasRole(userId, roleName);
+    // Mapeamento de ações para roles do banco (formato brasileiro)
+    const roleMapping = {
+        'USER': {
+            'CREATE': ['USER_CREATE', 'USUARIO/SAVE', 'USUARIO/CREATE'],
+            'UPDATE': ['USER_UPDATE', 'USUARIO/EDICAO', 'USUARIO/SAVE'],
+            'DELETE': ['USER_DELETE', 'USUARIO/EXCLUIR'],
+            'BLOCK': ['USER_BLOCK', 'USUARIO/BLOQUEIO'],
+            'RESET': ['USER_RESET', 'USUARIO/RESET_SENHA'],
+            'READ': ['USER_READ', 'USUARIO/CONSULT']
+        },
+        'PROFILE': {
+            'UPDATE': ['PROFILE_UPDATE', 'PERFIL/SAVE'],
+            'CREATE': ['PROFILE_CREATE', 'PERFIL/SAVE'],
+            'DELETE': ['PROFILE_DELETE', 'PERFIL/EXCLUIR']
+        }
+    };
+
+    const resourceUpper = resource.toUpperCase();
+    const actionUpper = action.toUpperCase();
+
+    // Buscar roles possíveis para esta ação
+    const possibleRoles = roleMapping[resourceUpper]?.[actionUpper] || [];
     
-    console.log(`[RBAC] Usuário ${userId} - permissão ${action}/${resource} (${roleName}): ${hasRoleResult ? 'GRANTED' : 'DENIED'}`);
-    return hasRoleResult;
+    // Adicionar formato padrão também (ex: USER_CREATE)
+    const defaultRole = `${resourceUpper}_${actionUpper}`;
+    if (!possibleRoles.includes(defaultRole)) {
+        possibleRoles.push(defaultRole);
+    }
+
+    // Verificar se o usuário tem alguma das roles possíveis
+    for (const roleName of possibleRoles) {
+        const hasRoleResult = await hasRole(userId, roleName);
+        if (hasRoleResult) {
+            console.log(`[RBAC] Usuário ${userId} - permissão ${action}/${resource} (${roleName}): GRANTED`);
+            return true;
+        }
+    }
+    
+    console.log(`[RBAC] Usuário ${userId} - permissão ${action}/${resource} (roles tentadas: ${possibleRoles.join(', ')}): DENIED`);
+    return false;
 }
 
 /**

@@ -47,6 +47,25 @@ export const AuthProvider = ({ children }) => {
             // Se um perfil específico foi selecionado, usar ele, senão usar o primeiro perfil
             const activeProfile = selectedProfile || profiles[0];
             
+            // Buscar roles e permissões do usuário
+            let roles = [];
+            let isMaster = profiles.some(p => p.str_descricao && p.str_descricao.toUpperCase() === 'MASTER');
+            
+            try {
+                const permissionsResponse = await fetch(`/api/auth/permissions`, {
+                    headers: {
+                        'x-user-id': userData.id_usuario.toString()
+                    }
+                });
+                if (permissionsResponse.ok) {
+                    const permissionsData = await permissionsResponse.json();
+                    roles = permissionsData.roles || [];
+                    isMaster = permissionsData.is_master || isMaster;
+                }
+            } catch (error) {
+                console.warn('Erro ao carregar permissões no login:', error);
+            }
+
             const userToSave = {
                 id: userData.id_usuario,
                 name: userData.str_descricao,
@@ -54,7 +73,8 @@ export const AuthProvider = ({ children }) => {
                 email: userData.email || '',
                 profiles: profiles,
                 activeProfile: activeProfile,
-                isMaster: profiles.some(p => p.str_descricao && p.str_descricao.toUpperCase() === 'MASTER')
+                isMaster: isMaster,
+                roles: roles
             };
 
             setUser(userToSave);

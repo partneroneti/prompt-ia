@@ -103,3 +103,4 @@ AND NOT EXISTS (
 RETURNING id, id_usuario, id_perfil;
 */
 
+

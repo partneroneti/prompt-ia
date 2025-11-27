@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MessageCircle, X, Send, Sparkles, Paperclip, Globe, ArrowUp, AlertTriangle } from 'lucide-react';
+import { MessageCircle, X, Send, Sparkles, Paperclip, Globe, ArrowUp, AlertTriangle, FileText, Download, Search } from 'lucide-react';
 import clsx from 'clsx';
+import { useNavigate } from 'react-router-dom';
 import { useUser } from '../context/UserContext';
 import { useAuth } from '../context/AuthContext';
 import { processCommandWithAI, confirmAction } from '../services/openai';
@@ -12,8 +13,11 @@ const FloatingChat = () => {
         { id: 1, type: 'bot', text: 'Olá! Como posso ajudar você hoje?' }
     ]);
     const [pendingAction, setPendingAction] = useState(null);
+    const [previewData, setPreviewData] = useState(null);
+    const [isTyping, setIsTyping] = useState(false);
     const { queryUsers } = useUser();
     const { getAuthHeaders, user, loading: authLoading } = useAuth();
+    const navigate = useNavigate();
     const messagesEndRef = useRef(null);
 
     const scrollToBottom = () => {
@@ -63,11 +67,15 @@ const FloatingChat = () => {
         }
 
         try {
+            // Mostrar animação de digitando
+            setIsTyping(true);
+            
             console.log('[FloatingChat] processCommand iniciado - user:', user, 'authLoading:', authLoading);
             
             // Verificar se usuário está logado ANTES de obter headers
             if (!user || !user.id) {
                 console.warn('[FloatingChat] Usuário não está logado!', { user, authLoading, hasUser: !!user, hasId: user?.id });
+                setIsTyping(false);
                 setMessages(prev => [...prev, {
                     id: Date.now(),
                     type: 'bot',
@@ -82,6 +90,7 @@ const FloatingChat = () => {
             const userId = user.id;
             if (!userId || userId === undefined || userId === null) {
                 console.error('[FloatingChat] ID do usuário inválido!', { user, userId, type: typeof userId });
+                setIsTyping(false);
                 setMessages(prev => [...prev, {
                     id: Date.now(),
                     type: 'bot',
@@ -98,6 +107,9 @@ const FloatingChat = () => {
             console.log('[FloatingChat] Criando headers diretamente do user.id:', authHeaders, 'User ID:', userId, 'User completo:', user);
             console.log('[FloatingChat] Chamando processCommandWithAI com:', { text, authHeaders });
             const response = await processCommandWithAI(text, authHeaders);
+            
+            // Parar animação de digitando
+            setIsTyping(false);
 
             if (response.type === 'TEXT') {
                 setMessages(prev => [...prev, {
@@ -111,6 +123,17 @@ const FloatingChat = () => {
                     id: Date.now(),
                     type: 'bot',
                     text: response.message
+                }]);
+            }
+            else if (response.type === 'CUSTOM_REPORT_CREATED') {
+                setMessages(prev => [...prev, {
+                    id: Date.now(),
+                    type: 'bot',
+                    text: response.message,
+                    isCustomReport: true,
+                    reportId: response.reportId,
+                    reportName: response.reportName,
+                    actions: response.actions
                 }]);
             }
             else if (response.type === 'CONFIRMATION_REQUIRED') {
@@ -158,6 +181,7 @@ const FloatingChat = () => {
             }
         } catch (error) {
             console.error('Erro ao processar comando:', error);
+            setIsTyping(false);
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 type: 'bot',
@@ -170,9 +194,11 @@ const FloatingChat = () => {
         if (!pendingAction || !pendingAction.token) return;
 
         try {
+            setIsTyping(true);
             // Criar headers diretamente do user.id
             const authHeaders = user && user.id ? { 'x-user-id': user.id.toString() } : {};
             const response = await confirmAction(pendingAction.token, authHeaders);
+            setIsTyping(false);
             
             // Se for relatório, fazer download automático
             if (response.type === 'REPORT_READY' && response.reportUrl) {
@@ -191,6 +217,7 @@ const FloatingChat = () => {
             }]);
         } catch (error) {
             console.error('Erro ao confirmar ação:', error);
+            setIsTyping(false);
             setMessages(prev => [...prev, {
                 id: Date.now(),
                 type: 'bot',
@@ -247,10 +274,149 @@ const FloatingChat = () => {
                                         Confirmação
                                     </div>
                                 )}
+                                {msg.isCustomReport && (
+                                    <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                                        <div className="text-xs font-semibold text-blue-900 mb-2">📊 {msg.reportName}</div>
+                                        <div className="flex flex-wrap gap-2">
+                                            <button
+                                                onClick={() => {
+                                                    navigate(`/reports?type=${msg.reportId}`);
+                                                }}
+                                                className="px-3 py-1.5 bg-blue-600 text-white text-xs rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-1"
+                                            >
+                                                <FileText size={12} />
+                                                Ver na Tela
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const response = await fetch(`/api/reports/preview`, {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify({ type: msg.reportId })
+                                                        });
+                                                        if (!response.ok) {
+                                                            throw new Error('Erro ao buscar preview');
+                                                        }
+                                                        const data = await response.json();
+                                                        if (data.rows && data.rows.length > 0) {
+                                                            // Mostrar preview em uma nova mensagem
+                                                            setPreviewData({
+                                                                columns: Object.keys(data.rows[0]),
+                                                                rows: data.rows.slice(0, 10), // Mostrar apenas 10 primeiros
+                                                                total: data.count
+                                                            });
+                                                        } else {
+                                                            alert('Nenhum registro encontrado.');
+                                                        }
+                                                    } catch (error) {
+                                                        console.error('Erro ao visualizar:', error);
+                                                        alert('Erro ao visualizar relatório. Tente novamente.');
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 bg-slate-100 text-slate-700 text-xs rounded-lg hover:bg-slate-200 transition-colors flex items-center gap-1"
+                                            >
+                                                <Search size={12} />
+                                                Visualizar
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    try {
+                                                        const response = await fetch(`/api/reports/generate?type=${msg.reportId}`);
+                                                        if (!response.ok) {
+                                                            throw new Error('Erro ao gerar relatório');
+                                                        }
+                                                        const blob = await response.blob();
+                                                        const url = window.URL.createObjectURL(blob);
+                                                        const link = document.createElement('a');
+                                                        link.href = url;
+                                                        link.download = `relatorio_${msg.reportName || msg.reportId}_${new Date().toISOString().split('T')[0]}.csv`;
+                                                        document.body.appendChild(link);
+                                                        link.click();
+                                                        window.URL.revokeObjectURL(url);
+                                                        document.body.removeChild(link);
+                                                    } catch (error) {
+                                                        console.error('Erro ao baixar:', error);
+                                                        alert('Erro ao baixar CSV. Tente novamente.');
+                                                    }
+                                                }}
+                                                className="px-3 py-1.5 bg-green-600 text-white text-xs rounded-lg hover:bg-green-700 transition-colors flex items-center gap-1"
+                                            >
+                                                <Download size={12} />
+                                                Baixar CSV
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
                                 {msg.text}
                             </div>
                         </div>
                     ))}
+                    
+                    {/* Animação de digitando */}
+                    {isTyping && (
+                        <div className="flex gap-3 mb-4">
+                            <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 shadow-sm bg-white border border-slate-200">
+                                <Sparkles size={14} className="text-blue-600" />
+                            </div>
+                            <div className="p-3 rounded-2xl shadow-sm border text-sm bg-white border-slate-100 text-slate-700 rounded-tl-none">
+                                <div className="flex items-center gap-1.5">
+                                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0ms', animationDuration: '1.4s' }}></div>
+                                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s', animationDuration: '1.4s' }}></div>
+                                    <div className="w-2 h-2 bg-slate-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s', animationDuration: '1.4s' }}></div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Preview Modal */}
+                    {previewData && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+                            <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[80vh] flex flex-col">
+                                <div className="p-4 border-b border-slate-200 flex justify-between items-center">
+                                    <h3 className="text-lg font-semibold text-slate-800">Preview do Relatório ({previewData.total} registros)</h3>
+                                    <button
+                                        onClick={() => setPreviewData(null)}
+                                        className="text-slate-400 hover:text-slate-600"
+                                    >
+                                        <X size={20} />
+                                    </button>
+                                </div>
+                                <div className="flex-1 overflow-auto p-4">
+                                    <div className="bg-slate-900 rounded-lg overflow-hidden">
+                                        <table className="w-full text-sm">
+                                            <thead>
+                                                <tr className="border-b border-slate-700">
+                                                    {previewData.columns.map((col) => (
+                                                        <th key={col} className="px-4 py-3 text-left font-medium text-slate-300 uppercase text-xs">
+                                                            {col}
+                                                        </th>
+                                                    ))}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {previewData.rows.map((row, idx) => (
+                                                    <tr key={idx} className="border-b border-slate-800 hover:bg-slate-800">
+                                                        {previewData.columns.map((col) => (
+                                                            <td key={col} className="px-4 py-3 text-slate-200">
+                                                                {row[col] !== null && row[col] !== undefined ? String(row[col]) : '-'}
+                                                            </td>
+                                                        ))}
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                    {previewData.total > 10 && (
+                                        <p className="text-sm text-slate-500 mt-2 text-center">
+                                            Mostrando 10 de {previewData.total} registros. Acesse a tela de relatórios para ver todos.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
                     <div ref={messagesEndRef} />
 
                     {/* Suggestions (Only show if few messages) */}
