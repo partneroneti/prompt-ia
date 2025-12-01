@@ -905,66 +905,97 @@ app.post('/api/chat', async (req, res) => {
                     }
                     
                     // Extrair novos valores da mensagem
+                    // IMPORTANTE: Só extrair se o valor foi explicitamente fornecido na mensagem
                     let newEmail = null;
                     let newName = null;
                     let newCpf = null;
                     let newPassword = null;
                     let newProfile = null;
                     
-                    // Extrair novo email
+                    // Extrair novo email - SÓ se houver um email explícito na mensagem
                     if (lowerMessage.includes('email')) {
                         const newEmailMatch = message.match(/(?:para|@|email)\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
                         if (newEmailMatch) {
                             newEmail = newEmailMatch[1];
                         } else {
-                            // Tentar pegar o último email mencionado
+                            // Tentar pegar o último email mencionado APENAS se houver múltiplos emails
                             const emails = message.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/g);
                             if (emails && emails.length >= 2) {
                                 newEmail = emails[emails.length - 1]; // Último email é o novo
                             }
+                            // Se não encontrou email explícito, NÃO definir newEmail (deixar null)
+                            // A validação em findUserAndUpdate vai solicitar o email
                         }
                     }
                     
-                    // Extrair novo nome
+                    // Extrair novo nome - SÓ se houver um nome explícito na mensagem
                     if (lowerMessage.includes('nome')) {
                         const newNameMatch = message.match(/(?:para|nome)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
                         if (newNameMatch) {
                             newName = newNameMatch[1];
                         }
+                        // Se não encontrou nome explícito, NÃO definir newName (deixar null)
                     }
                     
-                    // Extrair novo CPF
+                    // Extrair novo CPF - SÓ se houver um CPF explícito na mensagem
                     if (lowerMessage.includes('cpf')) {
                         const newCpfMatch = message.match(/(?:para|cpf)\s+(\d{3}\.\d{3}\.\d{3}-\d{2})/);
                         if (newCpfMatch) {
                             newCpf = newCpfMatch[1];
                         }
+                        // Se não encontrou CPF explícito, NÃO definir newCpf (deixar null)
                     }
                     
-                    // Extrair novo perfil
+                    // Extrair novo perfil - SÓ se houver um perfil explícito na mensagem
                     if (lowerMessage.includes('perfil')) {
                         if (lowerMessage.includes('master')) {
                             newProfile = 'MASTER';
                         } else if (lowerMessage.includes('operacional')) {
                             newProfile = 'OPERACIONAL';
                         }
+                        // Se não encontrou perfil explícito, NÃO definir newProfile (deixar null)
                     }
                     
-                    if (login || email || cpf) {
-                        console.log('[CHAT] Redirecionando para findUserAndUpdate com:', { login, email, cpf, newEmail, newName, newCpf, newPassword, newProfile });
-                        fnName = 'findUserAndUpdate';
-                        args = {
-                            login: login,
-                            email: email,
-                            cpf: cpf,
-                            newEmail: newEmail,
-                            newName: newName,
-                            newCpf: newCpf,
-                            newPassword: newPassword,
-                            newProfile: newProfile
-                        };
-                    } else {
-                        console.warn('[CHAT] Não foi possível extrair login/email/cpf da mensagem para atualizar');
+                    // VALIDAÇÃO: Se o usuário pediu para atualizar algo mas não forneceu o novo valor,
+                    // não redirecionar para findUserAndUpdate - deixar a IA processar e solicitar o dado
+                    const requestedUpdate = lowerMessage.includes('atualizar') || lowerMessage.includes('atualize') || 
+                                           lowerMessage.includes('alterar') || lowerMessage.includes('altere') ||
+                                           lowerMessage.includes('trocar') || lowerMessage.includes('troque') ||
+                                           lowerMessage.includes('mudar') || lowerMessage.includes('mude');
+                    
+                    if (requestedUpdate) {
+                        // Verificar se o campo foi solicitado mas o novo valor não foi fornecido
+                        const emailRequested = lowerMessage.includes('email');
+                        const nameRequested = lowerMessage.includes('nome');
+                        const cpfRequested = lowerMessage.includes('cpf');
+                        const profileRequested = lowerMessage.includes('perfil');
+                        
+                        if ((emailRequested && !newEmail) || 
+                            (nameRequested && !newName) || 
+                            (cpfRequested && !newCpf) || 
+                            (profileRequested && !newProfile)) {
+                            // Não redirecionar - deixar a IA processar e solicitar o dado faltante
+                            console.log('[CHAT] Usuário pediu atualização mas não forneceu novo valor - deixando IA processar');
+                        } else if (login || email || cpf) {
+                            // Só redirecionar se tiver identificador do usuário E novo valor fornecido
+                            console.log('[CHAT] Redirecionando para findUserAndUpdate com:', { login, email, cpf, newEmail, newName, newCpf, newPassword, newProfile });
+                            fnName = 'findUserAndUpdate';
+                            args = {
+                                login: login,
+                                email: email,
+                                cpf: cpf,
+                                newEmail: newEmail,
+                                newName: newName,
+                                newCpf: newCpf,
+                                newPassword: newPassword,
+                                newProfile: newProfile
+                            };
+                        } else {
+                            console.warn('[CHAT] Não foi possível extrair login/email/cpf da mensagem para atualizar');
+                        }
+                    } else if (login || email || cpf) {
+                        // Se não foi pedido update mas tem identificador, pode ser apenas consulta
+                        console.log('[CHAT] Não foi pedido update explícito, mantendo queryUsers');
                     }
                 }
             } catch (interceptError) {
@@ -1046,6 +1077,38 @@ app.post('/api/chat', async (req, res) => {
                 if (!email || !email.trim()) missingFields.push('email');
                 if (!profile || !profile.trim()) missingFields.push('perfil');
                 if (!company || !company.trim()) missingFields.push('empresa');
+
+                // VALIDAÇÃO CRÍTICA: Verificar se email não foi gerado automaticamente
+                if (email && email.trim()) {
+                    const emailStr = String(email).trim();
+                    // Rejeitar emails genéricos ou suspeitos que podem ter sido gerados automaticamente
+                    const suspiciousEmailPatterns = [
+                        /example\.com/i,
+                        /test\.com/i,
+                        /placeholder/i,
+                        /temp/i,
+                        /fake/i,
+                        /generated/i,
+                        /@empresa\.com/i, // Email genérico muito comum
+                        /@company\.com/i
+                    ];
+                    
+                    if (suspiciousEmailPatterns.some(pattern => pattern.test(emailStr))) {
+                        return res.status(400).json({
+                            type: 'ERROR',
+                            message: `O email fornecido parece ser genérico ou gerado automaticamente. Por favor, forneça um email válido e específico do usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@empresa.com.br, perfil OPERACIONAL, empresa DANIEL CRED`
+                        });
+                    }
+                    
+                    // Validar formato de email básico
+                    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                    if (!emailRegex.test(emailStr)) {
+                        return res.status(400).json({
+                            type: 'ERROR',
+                            message: `O email fornecido não está em um formato válido. Por favor, forneça um email válido. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@empresa.com.br, perfil OPERACIONAL, empresa DANIEL CRED`
+                        });
+                    }
+                }
 
                 // Outros campos obrigatórios faltando
                 if (missingFields.length > 0) {
@@ -1430,30 +1493,95 @@ app.post('/api/chat', async (req, res) => {
                     const { login, email, cpf, newName, newEmail, newPassword, newCpf, newProfile } = args;
                     console.log('Args:', args);
 
+                    // VALIDAÇÃO CRÍTICA: Campos imutáveis NÃO podem ser alterados
+                    // Login e CPF são imutáveis após criação - BLOQUEAR qualquer tentativa de alteração
+                    if (args.newLogin) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: 'O login não pode ser alterado após a criação do usuário. O login é um campo imutável.'
+                        });
+                    }
+
+                    // VALIDAÇÃO CRÍTICA: Verificar se os novos valores são válidos e não foram gerados automaticamente
+                    // Rejeitar valores que parecem ser gerados automaticamente ou inferidos
+                    const isValidValue = (value) => {
+                        if (!value || value === null || value === undefined) return false;
+                        const strValue = String(value).trim();
+                        if (strValue === '' || strValue === 'undefined' || strValue === 'null') return false;
+                        // Rejeitar emails genéricos ou suspeitos
+                        if (strValue.includes('@')) {
+                            const suspiciousPatterns = [
+                                /example\.com/i,
+                                /test\.com/i,
+                                /placeholder/i,
+                                /temp/i,
+                                /fake/i,
+                                /generated/i
+                            ];
+                            if (suspiciousPatterns.some(pattern => pattern.test(strValue))) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+
+                    // Validar que se o usuário pediu para atualizar um campo, o novo valor DEVE ser fornecido
+                    // Não podemos inferir ou gerar valores automaticamente
                     let setClauses = [];
                     let whereClauses = [];
                     const params = [];
                     let paramCount = 1;
+                    const missingFields = [];
 
                     if (newName) {
-                        setClauses.push(`str_descricao = $${paramCount}`);
-                        params.push(newName);
-                        paramCount++;
+                        if (!isValidValue(newName)) {
+                            missingFields.push('novo nome');
+                        } else {
+                            setClauses.push(`str_descricao = $${paramCount}`);
+                            params.push(newName);
+                            paramCount++;
+                        }
                     }
                     if (newEmail) {
-                        setClauses.push(`email = $${paramCount}`);
-                        params.push(newEmail);
-                        paramCount++;
+                        if (!isValidValue(newEmail)) {
+                            missingFields.push('novo email');
+                        } else {
+                            // Validar formato de email básico
+                            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                            if (!emailRegex.test(String(newEmail).trim())) {
+                                return res.json({
+                                    type: 'ERROR',
+                                    message: 'O email fornecido não está em um formato válido. Por favor, forneça um email válido.'
+                                });
+                            }
+                            setClauses.push(`email = $${paramCount}`);
+                            params.push(String(newEmail).trim());
+                            paramCount++;
+                        }
                     }
                     if (newPassword) {
-                        setClauses.push(`str_senha = $${paramCount}`);
-                        params.push(newPassword);
-                        paramCount++;
+                        if (!isValidValue(newPassword)) {
+                            missingFields.push('nova senha');
+                        } else {
+                            setClauses.push(`str_senha = $${paramCount}`);
+                            params.push(newPassword);
+                            paramCount++;
+                        }
                     }
                     if (newCpf) {
-                        setClauses.push(`str_cpf = $${paramCount}`);
-                        params.push(newCpf);
-                        paramCount++;
+                        // CPF é IMUTÁVEL após criação - BLOQUEAR qualquer tentativa de alteração
+                        return res.json({
+                            type: 'ERROR',
+                            message: 'O CPF não pode ser alterado após a criação do usuário. O CPF é um campo imutável.'
+                        });
+                    }
+
+                    // Se algum campo foi solicitado mas não foi fornecido corretamente, retornar erro
+                    if (missingFields.length > 0) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: `Para fazer a alteração, é necessário fornecer explicitamente: ${missingFields.join(', ')}. Por favor, informe os dados corretos antes de atualizar.`
+                        });
                     }
 
                     // Se for mudar perfil, tratar separadamente (requer confirmação se for para MASTER)

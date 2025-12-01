@@ -53,18 +53,17 @@ const TOOLS = [
         type: "function",
         function: {
             name: "findUserAndUpdate",
-            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil.",
+            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil. IMPORTANTE: Login e CPF são IMUTÁVEIS e NÃO podem ser alterados. Você DEVE sempre solicitar os novos valores antes de chamar esta função.",
             parameters: {
                 type: "object",
                 properties: {
-                    login: { type: "string", description: "Login do usuário a ser atualizado" },
-                    email: { type: "string", description: "Email atual do usuário a ser atualizado" },
-                    cpf: { type: "string", description: "CPF do usuário a ser atualizado" },
-                    newName: { type: "string", description: "Novo nome completo" },
-                    newEmail: { type: "string", description: "Novo email" },
-                    newPassword: { type: "string", description: "Nova senha" },
-                    newCpf: { type: "string", description: "Novo CPF" },
-                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis." }
+                    login: { type: "string", description: "Login do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    email: { type: "string", description: "Email atual do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    cpf: { type: "string", description: "CPF do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    newName: { type: "string", description: "Novo nome completo (OBRIGATÓRIO se o usuário pedir para atualizar o nome)" },
+                    newEmail: { type: "string", description: "Novo email (OBRIGATÓRIO se o usuário pedir para atualizar o email)" },
+                    newPassword: { type: "string", description: "Nova senha (OBRIGATÓRIO se o usuário pedir para atualizar a senha)" },
+                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis. OBRIGATÓRIO se o usuário pedir para atualizar o perfil." }
                 },
                 required: []
             }
@@ -537,11 +536,15 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 ## 1. Inclusão de Usuário (createUser)
 - Só use \`createUser\` após coletar **nome, login, e-mail, CPF, perfil e empresa**.
 - Campos obrigatórios do payload: \`name\`, \`login\`, \`email\`, \`cpf\`, \`profile\`, \`company\`.
-- **CPF é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere CPF automaticamente.
-- **Se o usuário tentar criar sem CPF**, você deve:
+- 🚨 **REGRA CRÍTICA - DADOS OBRIGATÓRIOS**:
+  - **CPF é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere CPF automaticamente.
+  - **EMAIL é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere emails automaticamente.
+  - **NUNCA** use emails genéricos como "example.com", "test.com", "@empresa.com" ou similares
+  - **NUNCA** infira ou invente valores para campos obrigatórios
+- **Se o usuário tentar criar sem CPF ou sem email**, você deve:
   1. **NÃO chamar** a função \`createUser\`
-  2. **Solicitar o CPF** de forma clara e instrutiva
-  3. **Mostrar exemplo** de como informar o CPF
+  2. **Solicitar os dados faltantes** de forma clara e instrutiva
+  3. **Mostrar exemplo** de como informar os dados completos
 
 **Exemplo de resposta quando CPF está faltando**:
 \`\`\`
@@ -553,11 +556,30 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - Sempre retorne: status (sucesso/erro), resumo da operação e identificador de auditoria.
 
 ## 2. Alteração de Usuário (findUserAndUpdate / blockUser / blockUsers / resetPasswords)
-- Só altere **nome**, **email**, **senha**, **CPF** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login.
+- 🚨 **REGRA CRÍTICA - DADOS OBRIGATÓRIOS PARA ALTERAÇÕES**: 
+  - **SEMPRE solicite os dados antes de fazer qualquer alteração**, mesmo que pareça que os dados estão na mensagem
+  - **NUNCA** faça alterações sem que o usuário forneça explicitamente os novos valores
+  - **NUNCA** gere, infira ou invente valores para campos que precisam ser atualizados
+  - **NUNCA** use valores genéricos como "example.com", "test.com", "@empresa.com" ou similares
+  - **SEMPRE** peça os dados faltantes antes de executar qualquer alteração
+  - Se o usuário pedir para "atualizar email" mas não fornecer o novo email, você DEVE:
+    1. **NÃO chamar** findUserAndUpdate
+    2. **Solicitar o novo email** de forma clara: "Para atualizar o email, preciso que você informe o novo email. Qual é o novo email que deseja definir?"
+  - Se o usuário pedir para "atualizar nome" mas não fornecer o novo nome, você DEVE solicitar o novo nome antes de fazer a alteração
+  - Se o usuário pedir para "atualizar perfil" mas não fornecer o novo perfil, você DEVE solicitar o novo perfil antes de fazer a alteração
+  - **Mesmo que a mensagem pareça ter os dados, SEMPRE confirme e solicite explicitamente antes de atualizar**
+- 🚨 **REGRA CRÍTICA - CAMPOS IMUTÁVEIS**:
+  - **Login é IMUTÁVEL** - NÃO pode ser alterado após criação. Se o usuário pedir para alterar login, informe que não é possível.
+  - **CPF é IMUTÁVEL** - NÃO pode ser alterado após criação. Se o usuário pedir para alterar CPF, informe que não é possível.
+  - Campos que PODEM ser alterados: **nome**, **email**, **senha**, **perfil**
+  - Campos que NÃO PODEM ser alterados: **login**, **CPF**
+- Só altere **nome**, **email**, **senha** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login ou CPF.
 - Para mudar perfil para **MASTER**: requer confirmação obrigatória (ação sensível).
 - Para mudar perfil para outros perfis: executa diretamente sem confirmação.
 - O sistema suporta múltiplos tipos de perfis do banco de dados, não apenas MASTER e OPERACIONAL. Use queryProfiles para listar todos os perfis disponíveis.
 - Exemplo: "Trocar o perfil do usuário teste.op para MASTER" → \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação).
+- Exemplo ERRADO: "Atualizar email do usuário teste.op" (sem fornecer novo email) → **NÃO** chame findUserAndUpdate, **SOLICITE** o novo email primeiro
+- Exemplo CORRETO: "Atualizar email do usuário teste.op para novo.email@empresa.com.br" → \`findUserAndUpdate({ login: "teste.op", newEmail: "novo.email@empresa.com.br" })\`
 
 - **REGRA CRÍTICA - BLOQUEAR/DESBLOQUEAR**: 
   Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
@@ -641,7 +663,10 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - "Trocar o perfil do usuário teste.op para OPERACIONAL" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "OPERACIONAL" })\` (executa diretamente).
 - **"Atualize email do usuário luis.eri para luis.eri@partnergroup.com.br"** → \`findUserAndUpdate({ login: "luis.eri", newEmail: "luis.eri@partnergroup.com.br" })\` - Use diretamente, não precisa queryUsers!
 - "Trocar o e-mail do usuário luis.eri.santos para luis@empresa.com" → validar permissão e usar \`findUserAndUpdate({ login: "luis.eri.santos", newEmail: "luis@empresa.com" })\`, retornando sempre algo como "Audit ID: 92ab1df4".
-- **"Atualizar [qualquer campo] do usuário [login/email]"** → \`findUserAndUpdate({ login: "...", newEmail: "..." })\` ou \`findUserAndUpdate({ email: "...", newName: "..." })\` - Use diretamente!
+- **"Atualizar [qualquer campo] do usuário [login/email]"** → **SEMPRE solicite o novo valor antes de chamar findUserAndUpdate**, mesmo que pareça ter na mensagem. **NUNCA** assuma ou infira valores.
+- **"Atualizar email do usuário teste.op"** (sem fornecer novo email) → **NÃO** chame findUserAndUpdate, **SOLICITE**: "Para atualizar o email, preciso que você informe o novo email. Qual é o novo email que deseja definir?"
+- **"Atualizar login do usuário teste.op"** → **NÃO** é possível, informe: "O login não pode ser alterado após a criação do usuário. O login é um campo imutável."
+- **"Atualizar CPF do usuário teste.op"** → **NÃO** é possível, informe: "O CPF não pode ser alterado após a criação do usuário. O CPF é um campo imutável."
 - "Bloquear todos os usuários da empresa DANIEL CRED" → pedir confirmação e usar \`blockUsers({ company: "DANIEL CRED", block: true })\`.
 - "Desbloquear todos os usuários da empresa Partner" → usar \`blockUsers({ company: "Partner", block: false })\` - executa diretamente sem confirmação!
 - **"Bloquear usuário teste.op"** → \`blockUser({ login: "teste.op", block: true })\` - Use diretamente, não precisa queryUsers!
