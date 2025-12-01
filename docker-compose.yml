@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"
+    networks:
+      - prompt-ia
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "5174:80"
+    depends_on:
+      - backend
+    networks:
+      - prompt-ia
+
+networks:
+  prompt-ia:
+    driver: bridge

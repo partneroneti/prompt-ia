@@ -1,0 +1,14 @@
+node_modules
+server/node_modules
+dist
+server/dist
+coverage
+.npmrc
+.env
+.git
+.gitignore
+npm-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+*.swp
+*.swo

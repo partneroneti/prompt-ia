@@ -91,6 +91,39 @@ Acesse: **http://localhost:5174/**
 
 ---
 
+## 🐳 Rodando com Docker
+
+1. Copie o arquivo de exemplo e preencha as variáveis:
+   ```bash
+   cp .env.example .env
+   # Atualize VITE_OPENAI_API_KEY e, se necessário, as credenciais do banco
+   ```
+
+2. Suba os serviços (frontend + backend):
+   ```bash
+   docker compose up --build
+   ```
+
+3. Acesse: **http://localhost:5174/**
+   - Backend disponível em **http://localhost:3001/**
+   - O proxy `/api` já aponta para o backend dentro do Docker.
+
+> Observação: se o usuário do banco não puder criar tabelas, mantenha `AUDIT_AUTO_CREATE=false` (padrão) e crie manualmente a tabela `audit_logs`:
+> ```sql
+> CREATE TABLE audit_logs (
+>   id SERIAL PRIMARY KEY,
+>   action_type VARCHAR(100) NOT NULL,
+>   target_user_id INTEGER,
+>   details JSONB,
+>   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+> );
+> ```
+> Caso tenha permissão de DDL e queira criação automática, defina `AUDIT_AUTO_CREATE=true` no `.env`.
+
+> Dica: se precisar usar o Vite em modo dev dentro do container, mantenha `VITE_API_TARGET=http://backend:3001` no `.env` (já vem no exemplo). Localmente ele continua usando `http://localhost:3001` como padrão.
+
+---
+
 ## 🤖 Usando o Gestor AI
 
 O sistema possui uma interface de chat alimentada por IA que compreende linguagem natural e executa operações no banco de dados automaticamente.

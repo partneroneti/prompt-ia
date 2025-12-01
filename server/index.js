@@ -1,3 +1,4 @@
+require('dotenv').config({ path: '../.env' });
 const express = require('express');
 const cors = require('cors');
 const db = require('./db');
@@ -33,6 +34,7 @@ app.use((req, res, next) => {
     next();
 });
 
+const allowAutoCreateAuditTable = process.env.AUDIT_AUTO_CREATE === 'true';
 const formatAuditId = (id) => (id ? `AUD-${id.toString().padStart(6, '0')}` : 'AUD-N/A');
 
 const ensurePermission = async (req, res, action, resource) => {
@@ -97,29 +99,37 @@ const testDbConnection = async () => {
         const result = await db.query('SELECT NOW()');
         console.log('✅ Database connected successfully at', result.rows[0].now);
         
-        // Verificar e criar tabela audit_logs se não existir
+        // Verificar e criar tabela audit_logs se não existir (opcional)
         try {
             const tableExists = await db.query(
                 "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'audit_logs')"
             );
             
             if (!tableExists.rows[0]?.exists) {
-                console.log('📋 Criando tabela audit_logs...');
-                await db.query(`
-                    CREATE TABLE audit_logs (
-                        id SERIAL PRIMARY KEY,
-                        action_type VARCHAR(100) NOT NULL,
-                        target_user_id INTEGER,
-                        details JSONB,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                `);
-                console.log('✅ Tabela audit_logs criada com sucesso');
+                if (!allowAutoCreateAuditTable) {
+                    console.warn('⚠️  Tabela audit_logs não existe e AUDIT_AUTO_CREATE está desabilitado. Crie manualmente ou habilite AUDIT_AUTO_CREATE=true.');
+                } else {
+                    console.log('📋 Criando tabela audit_logs...');
+                    await db.query(`
+                        CREATE TABLE audit_logs (
+                            id SERIAL PRIMARY KEY,
+                            action_type VARCHAR(100) NOT NULL,
+                            target_user_id INTEGER,
+                            details JSONB,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    `);
+                    console.log('✅ Tabela audit_logs criada com sucesso');
+                }
             } else {
                 console.log('✅ Tabela audit_logs já existe');
             }
         } catch (tableErr) {
-            console.error('⚠️  Erro ao verificar/criar tabela audit_logs:', tableErr.message);
+            if (tableErr.code === '42501') {
+                console.error('⚠️  Sem permissão para criar/verificar tabela audit_logs. Crie manualmente ou conceda permissões, ou deixe AUDIT_AUTO_CREATE desabilitado.');
+            } else {
+                console.error('⚠️  Erro ao verificar/criar tabela audit_logs:', tableErr.message);
+            }
         }
     } catch (err) {
         console.error('⚠️  Database connection failed:', err.message);
