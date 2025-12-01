@@ -1,9 +1,10 @@
 // Frontend service - calls backend /api/chat instead of OpenAI directly
-export const processCommandWithAI = async (text, authHeaders = {}) => {
+export const processCommandWithAI = async (text, authHeaders = {}, conversationHistory = []) => {
     try {
         console.log('[API] processCommandWithAI chamado com authHeaders:', authHeaders);
         console.log('[API] Tipo de authHeaders:', typeof authHeaders, 'É objeto?', authHeaders instanceof Object);
         console.log('[API] authHeaders tem x-user-id?', 'x-user-id' in authHeaders, 'Valor:', authHeaders['x-user-id']);
+        console.log('[API] Histórico de conversa:', conversationHistory.length, 'mensagens');
         
         // FALLBACK: Se não tiver x-user-id, tentar recuperar do localStorage
         if (!authHeaders || !authHeaders['x-user-id']) {
@@ -44,10 +45,20 @@ export const processCommandWithAI = async (text, authHeaders = {}) => {
             });
         }
         
+        const requestBody = { 
+            message: text,
+            history: conversationHistory
+        };
+        console.log('[API] Enviando requisição com histórico:', {
+            messageLength: text.length,
+            historyLength: conversationHistory.length,
+            lastHistoryMessages: conversationHistory.slice(-2).map(m => `${m.role}: ${m.content?.substring(0, 30)}...`)
+        });
+        
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers,
-            body: JSON.stringify({ message: text })
+            body: JSON.stringify(requestBody)
         });
 
         if (!response.ok) {

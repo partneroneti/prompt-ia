@@ -53,18 +53,18 @@ const TOOLS = [
         type: "function",
         function: {
             name: "findUserAndUpdate",
-            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil.",
+            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil. IMPORTANTE: Login e CPF são IMUTÁVEIS e NÃO podem ser alterados. Você DEVE sempre solicitar os novos valores antes de chamar esta função. Para resetar senha de outro usuário, use isPasswordReset=true e o sistema gerará uma senha aleatória automaticamente.",
             parameters: {
                 type: "object",
                 properties: {
-                    login: { type: "string", description: "Login do usuário a ser atualizado" },
-                    email: { type: "string", description: "Email atual do usuário a ser atualizado" },
-                    cpf: { type: "string", description: "CPF do usuário a ser atualizado" },
-                    newName: { type: "string", description: "Novo nome completo" },
-                    newEmail: { type: "string", description: "Novo email" },
-                    newPassword: { type: "string", description: "Nova senha" },
-                    newCpf: { type: "string", description: "Novo CPF" },
-                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis." }
+                    login: { type: "string", description: "Login do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    email: { type: "string", description: "Email atual do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    cpf: { type: "string", description: "CPF do usuário a ser atualizado (usado apenas para identificar o usuário)" },
+                    newName: { type: "string", description: "Novo nome completo (OBRIGATÓRIO se o usuário pedir para atualizar o nome)" },
+                    newEmail: { type: "string", description: "Novo email (OBRIGATÓRIO se o usuário pedir para atualizar o email)" },
+                    newPassword: { type: "string", description: "Nova senha (OBRIGATÓRIO se o usuário pedir para atualizar a senha com uma senha específica. NÃO use se for reset - use isPasswordReset=true)" },
+                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis. OBRIGATÓRIO se o usuário pedir para atualizar o perfil." },
+                    isPasswordReset: { type: "boolean", description: "Se true, o sistema gerará uma senha aleatória e marcará que o usuário precisa trocar a senha no próximo login. Use quando o usuário pedir para 'resetar senha', 'trocar senha' de outro usuário (não a própria senha)." }
                 },
                 required: []
             }
@@ -479,7 +479,7 @@ const TOOLS = [
     }
 ];
 
-const processMessage = async (message) => {
+const processMessage = async (message, conversationHistory = []) => {
     const securityResult = sanitizeUserMessage(message);
 
     if (securityResult.blocked) {
@@ -489,13 +489,33 @@ const processMessage = async (message) => {
         };
     }
 
+    // Limitar histórico para não exceder tokens (manter últimas 10 mensagens)
+    // Cada entrada de histórico tem role e content
+    const MAX_HISTORY_MESSAGES = 10;
+    const limitedHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES);
+
     try {
-        const completion = await openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
-            messages: [
-                {
-                    role: "system",
-                    content: `Você é um assistente de Gestão de Usuários via IA. Execute ações apenas usando as funções disponíveis e siga TODAS as regras abaixo.
+        // Construir array de mensagens com histórico
+        const messages = [
+            {
+                role: "system",
+                content: `Você é um assistente de Gestão de Usuários via IA. Execute ações apenas usando as funções disponíveis e siga TODAS as regras abaixo.
+
+🚨 CONTEXTO E HISTÓRICO DE CONVERSA - REGRA CRÍTICA:
+- Você tem acesso ao histórico completo da conversa anterior
+- Use o contexto das mensagens anteriores para entender referências como "ele", "ela", "seu", "dele", "dela", "esse usuário", "aquele", "desse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", etc.
+- **IMPORTANTE**: Se você acabou de retornar dados de um usuário (via queryUsers) e o usuário faz QUALQUER pergunta sobre "ele", "ela", "seu", "dele", "dela", "esse usuário", "desse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", "qual login", etc., você DEVE:
+  1. **NÃO fazer nova consulta** (queryUsers)
+  2. **NÃO tentar criar usuário** (createUser)
+  3. **NÃO pedir mais informações**
+  4. **Responder diretamente** com a informação que você já retornou no histórico
+- **Responda de forma concisa**: apenas a informação solicitada, sem explicações longas
+- Exemplos:
+  - Se você retornou "Operação: PARTNER" e o usuário pergunta "Ele é de qual operação?", responda apenas "PARTNER"
+  - Se você retornou "CPF: 000.000.000-00" e o usuário pergunta "E qual seu CPF?", responda apenas "000.000.000-00"
+  - Se você retornou "Email: luiz.eri@partnergroup.com.br" e o usuário pergunta "Qual o email dele?", responda apenas "luiz.eri@partnergroup.com.br"
+- **NUNCA** interprete perguntas sobre dados de um usuário já consultado como solicitação para criar novo usuário
+- Mantenha o contexto da conversa: se você acabou de consultar um usuário e o usuário pergunta algo sobre "ele", "seu", "dele", etc., você deve entender que se refere ao último usuário consultado e responder com os dados que você já retornou
 
 🚨 REGRA CRÍTICA - PRIORIZAR CRIAÇÃO DE USUÁRIO:
 Quando o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário", "criar um usuário", "novo usuário":
@@ -517,11 +537,15 @@ Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
 ## 1. Inclusão de Usuário (createUser)
 - Só use \`createUser\` após coletar **nome, login, e-mail, CPF, perfil e empresa**.
 - Campos obrigatórios do payload: \`name\`, \`login\`, \`email\`, \`cpf\`, \`profile\`, \`company\`.
-- **CPF é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere CPF automaticamente.
-- **Se o usuário tentar criar sem CPF**, você deve:
+- 🚨 **REGRA CRÍTICA - DADOS OBRIGATÓRIOS**:
+  - **CPF é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere CPF automaticamente.
+  - **EMAIL é OBRIGATÓRIO** e deve ser informado pelo usuário. Nunca gere emails automaticamente.
+  - **NUNCA** use emails genéricos como "example.com", "test.com", "@empresa.com" ou similares
+  - **NUNCA** infira ou invente valores para campos obrigatórios
+- **Se o usuário tentar criar sem CPF ou sem email**, você deve:
   1. **NÃO chamar** a função \`createUser\`
-  2. **Solicitar o CPF** de forma clara e instrutiva
-  3. **Mostrar exemplo** de como informar o CPF
+  2. **Solicitar os dados faltantes** de forma clara e instrutiva
+  3. **Mostrar exemplo** de como informar os dados completos
 
 **Exemplo de resposta quando CPF está faltando**:
 \`\`\`
@@ -533,11 +557,30 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - Sempre retorne: status (sucesso/erro), resumo da operação e identificador de auditoria.
 
 ## 2. Alteração de Usuário (findUserAndUpdate / blockUser / blockUsers / resetPasswords)
-- Só altere **nome**, **email**, **senha**, **CPF** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login.
+- 🚨 **REGRA CRÍTICA - DADOS OBRIGATÓRIOS PARA ALTERAÇÕES**: 
+  - **SEMPRE solicite os dados antes de fazer qualquer alteração**, mesmo que pareça que os dados estão na mensagem
+  - **NUNCA** faça alterações sem que o usuário forneça explicitamente os novos valores
+  - **NUNCA** gere, infira ou invente valores para campos que precisam ser atualizados
+  - **NUNCA** use valores genéricos como "example.com", "test.com", "@empresa.com" ou similares
+  - **SEMPRE** peça os dados faltantes antes de executar qualquer alteração
+  - Se o usuário pedir para "atualizar email" mas não fornecer o novo email, você DEVE:
+    1. **NÃO chamar** findUserAndUpdate
+    2. **Solicitar o novo email** de forma clara: "Para atualizar o email, preciso que você informe o novo email. Qual é o novo email que deseja definir?"
+  - Se o usuário pedir para "atualizar nome" mas não fornecer o novo nome, você DEVE solicitar o novo nome antes de fazer a alteração
+  - Se o usuário pedir para "atualizar perfil" mas não fornecer o novo perfil, você DEVE solicitar o novo perfil antes de fazer a alteração
+  - **Mesmo que a mensagem pareça ter os dados, SEMPRE confirme e solicite explicitamente antes de atualizar**
+- 🚨 **REGRA CRÍTICA - CAMPOS IMUTÁVEIS**:
+  - **Login é IMUTÁVEL** - NÃO pode ser alterado após criação. Se o usuário pedir para alterar login, informe que não é possível.
+  - **CPF é IMUTÁVEL** - NÃO pode ser alterado após criação. Se o usuário pedir para alterar CPF, informe que não é possível.
+  - Campos que PODEM ser alterados: **nome**, **email**, **senha**, **perfil**
+  - Campos que NÃO PODEM ser alterados: **login**, **CPF**
+- Só altere **nome**, **email**, **senha** ou **perfil** via \`findUserAndUpdate\`. Nunca tente alterar login ou CPF.
 - Para mudar perfil para **MASTER**: requer confirmação obrigatória (ação sensível).
 - Para mudar perfil para outros perfis: executa diretamente sem confirmação.
 - O sistema suporta múltiplos tipos de perfis do banco de dados, não apenas MASTER e OPERACIONAL. Use queryProfiles para listar todos os perfis disponíveis.
 - Exemplo: "Trocar o perfil do usuário teste.op para MASTER" → \`findUserAndUpdate({ login: "teste.op", newProfile: "MASTER" })\` (solicitará confirmação).
+- Exemplo ERRADO: "Atualizar email do usuário teste.op" (sem fornecer novo email) → **NÃO** chame findUserAndUpdate, **SOLICITE** o novo email primeiro
+- Exemplo CORRETO: "Atualizar email do usuário teste.op para novo.email@empresa.com.br" → \`findUserAndUpdate({ login: "teste.op", newEmail: "novo.email@empresa.com.br" })\`
 
 - **REGRA CRÍTICA - BLOQUEAR/DESBLOQUEAR**: 
   Quando o usuário pedir "bloquear [login/email]" ou "desbloquear [login/email]":
@@ -556,9 +599,21 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 
 ## 3. Consultas de Usuários (queryUsers)
 - Use \`queryUsers\` para contagens e listagens. Admitido filtros naturais: empresa (operation/company), período (\`date_from/date_to\` em PT-BR), perfil, grupo, status, login, CPF.
-- Para “Usuários incluídos esta semana” use \`{ date_from: "semana atual" }\`.
+- Para "Usuários incluídos esta semana" use \`{ date_from: "semana atual" }\`.
 - Sempre respeite RBAC: se o solicitante não puder ver certo escopo, retorne mensagem orientando a falta de permissão.
 - Resultados devem trazer contagem total, resumo e, quando aplicável, auditId.
+- **CONTEXTO CRÍTICO - PERGUNTAS DE FOLLOW-UP**:
+  - Quando você retornar dados de um usuário específico (ex: "Dados do Usuário: Operação: PARTNER, CPF: 000.000.000-00") e o usuário fizer QUALQUER pergunta de follow-up sobre "ele", "ela", "seu", "dele", "dela", "esse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", "qual login", etc., você DEVE:
+    1. **NÃO usar queryUsers novamente** - você já tem os dados no histórico
+    2. **NÃO usar createUser** - isso é para criar novo usuário, não para responder sobre usuário já consultado
+    3. **NÃO pedir mais informações** - você já tem tudo no histórico
+    4. **Responder diretamente e de forma concisa** com a informação que você já retornou
+  - Exemplos de perguntas de follow-up que devem ser respondidas com dados do histórico:
+    - "Ele é de qual operação?" → Responda apenas "PARTNER"
+    - "E qual seu CPF?" → Responda apenas "000.000.000-00"
+    - "Qual o email dele?" → Responda apenas o email que você já retornou
+    - "Qual o grupo?" → Responda apenas o grupo que você já retornou
+  - **NUNCA** interprete perguntas sobre dados de um usuário já consultado como solicitação para criar novo usuário
 
 ## 4. Relatórios
 ⚠️ **IMPORTANTE**: Se o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário" → use \`createUser\`. NÃO crie relatórios!
@@ -609,7 +664,10 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - "Trocar o perfil do usuário teste.op para OPERACIONAL" → usar \`findUserAndUpdate({ login: "teste.op", newProfile: "OPERACIONAL" })\` (executa diretamente).
 - **"Atualize email do usuário luis.eri para luis.eri@partnergroup.com.br"** → \`findUserAndUpdate({ login: "luis.eri", newEmail: "luis.eri@partnergroup.com.br" })\` - Use diretamente, não precisa queryUsers!
 - "Trocar o e-mail do usuário luis.eri.santos para luis@empresa.com" → validar permissão e usar \`findUserAndUpdate({ login: "luis.eri.santos", newEmail: "luis@empresa.com" })\`, retornando sempre algo como "Audit ID: 92ab1df4".
-- **"Atualizar [qualquer campo] do usuário [login/email]"** → \`findUserAndUpdate({ login: "...", newEmail: "..." })\` ou \`findUserAndUpdate({ email: "...", newName: "..." })\` - Use diretamente!
+- **"Atualizar [qualquer campo] do usuário [login/email]"** → **SEMPRE solicite o novo valor antes de chamar findUserAndUpdate**, mesmo que pareça ter na mensagem. **NUNCA** assuma ou infira valores.
+- **"Atualizar email do usuário teste.op"** (sem fornecer novo email) → **NÃO** chame findUserAndUpdate, **SOLICITE**: "Para atualizar o email, preciso que você informe o novo email. Qual é o novo email que deseja definir?"
+- **"Atualizar login do usuário teste.op"** → **NÃO** é possível, informe: "O login não pode ser alterado após a criação do usuário. O login é um campo imutável."
+- **"Atualizar CPF do usuário teste.op"** → **NÃO** é possível, informe: "O CPF não pode ser alterado após a criação do usuário. O CPF é um campo imutável."
 - "Bloquear todos os usuários da empresa DANIEL CRED" → pedir confirmação e usar \`blockUsers({ company: "DANIEL CRED", block: true })\`.
 - "Desbloquear todos os usuários da empresa Partner" → usar \`blockUsers({ company: "Partner", block: false })\` - executa diretamente sem confirmação!
 - **"Bloquear usuário teste.op"** → \`blockUser({ login: "teste.op", block: true })\` - Use diretamente, não precisa queryUsers!
@@ -623,27 +681,78 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - **"Gerar relatório de auditoria"** → \`generateReport({ type: "audit" })\` - Gera CSV de logs de auditoria!
 
 Seja extremamente rigoroso: valide permissão, confirme parâmetros, peça confirmação quando a ação for sensível e sempre retorne status + resumo + auditId.`
-                },
-                { role: "user", content: securityResult.sanitizedMessage }
-            ],
+            }
+        ];
+
+        // Adicionar histórico de conversa (se houver)
+        if (limitedHistory && limitedHistory.length > 0) {
+            // Validar formato do histórico: deve ter role e content
+            const validHistory = limitedHistory
+                .filter(msg => msg && msg.role && msg.content)
+                .map(msg => ({
+                    role: msg.role, // 'user' ou 'assistant'
+                    content: msg.content
+                }));
+            messages.push(...validHistory);
+            console.log('[OPENAI] Histórico adicionado:', validHistory.length, 'mensagens');
+            console.log('[OPENAI] Últimas mensagens do histórico:', validHistory.slice(-4).map(m => `${m.role}: ${m.content.substring(0, 50)}...`));
+        } else {
+            console.log('[OPENAI] Nenhum histórico fornecido');
+        }
+
+        // Adicionar mensagem atual do usuário
+        messages.push({
+            role: "user",
+            content: securityResult.sanitizedMessage
+        });
+
+        const completion = await openai.chat.completions.create({
+            model: "gpt-3.5-turbo",
+            messages: messages,
             tools: TOOLS,
             tool_choice: "auto"
         });
 
         const responseMessage = completion.choices[0].message;
 
+        // Construir histórico atualizado para retornar ao frontend
+        const updatedHistory = [...limitedHistory];
+        
+        // Adicionar mensagem do usuário ao histórico (apenas se ainda não estiver)
+        const lastUserMessage = updatedHistory[updatedHistory.length - 1];
+        if (!lastUserMessage || lastUserMessage.role !== 'user' || lastUserMessage.content !== securityResult.sanitizedMessage) {
+            updatedHistory.push({
+                role: 'user',
+                content: securityResult.sanitizedMessage
+            });
+        }
+
         if (responseMessage.tool_calls) {
+            // Para tool calls, manter o histórico atualizado com a mensagem do usuário
+            // A resposta da tool será adicionada ao histórico quando processada no backend
+            console.log('[OPENAI] Tool call detectado. Histórico atualizado com mensagem do usuário:', updatedHistory.length, 'mensagens');
             return {
                 type: 'TOOL_CALL',
-                toolCalls: responseMessage.tool_calls
+                toolCalls: responseMessage.tool_calls,
+                history: updatedHistory
             };
         }
 
         const safeContent = redactSensitiveOutput(responseMessage.content);
 
+        // Adicionar resposta da IA ao histórico (apenas se ainda não estiver)
+        const lastAssistantMessage = updatedHistory[updatedHistory.length - 1];
+        if (!lastAssistantMessage || lastAssistantMessage.role !== 'assistant' || lastAssistantMessage.content !== safeContent) {
+            updatedHistory.push({
+                role: 'assistant',
+                content: safeContent
+            });
+        }
+
         return {
             type: 'MESSAGE',
-            content: safeContent
+            content: safeContent,
+            history: updatedHistory
         };
 
     } catch (error) {
