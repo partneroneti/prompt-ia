@@ -479,7 +479,7 @@ const TOOLS = [
     }
 ];
 
-const processMessage = async (message) => {
+const processMessage = async (message, conversationHistory = []) => {
     const securityResult = sanitizeUserMessage(message);
 
     if (securityResult.blocked) {
@@ -489,13 +489,33 @@ const processMessage = async (message) => {
         };
     }
 
+    // Limitar histórico para não exceder tokens (manter últimas 10 mensagens)
+    // Cada entrada de histórico tem role e content
+    const MAX_HISTORY_MESSAGES = 10;
+    const limitedHistory = conversationHistory.slice(-MAX_HISTORY_MESSAGES);
+
     try {
-        const completion = await openai.chat.completions.create({
-            model: "gpt-3.5-turbo",
-            messages: [
-                {
-                    role: "system",
-                    content: `Você é um assistente de Gestão de Usuários via IA. Execute ações apenas usando as funções disponíveis e siga TODAS as regras abaixo.
+        // Construir array de mensagens com histórico
+        const messages = [
+            {
+                role: "system",
+                content: `Você é um assistente de Gestão de Usuários via IA. Execute ações apenas usando as funções disponíveis e siga TODAS as regras abaixo.
+
+🚨 CONTEXTO E HISTÓRICO DE CONVERSA - REGRA CRÍTICA:
+- Você tem acesso ao histórico completo da conversa anterior
+- Use o contexto das mensagens anteriores para entender referências como "ele", "ela", "seu", "dele", "dela", "esse usuário", "aquele", "desse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", etc.
+- **IMPORTANTE**: Se você acabou de retornar dados de um usuário (via queryUsers) e o usuário faz QUALQUER pergunta sobre "ele", "ela", "seu", "dele", "dela", "esse usuário", "desse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", "qual login", etc., você DEVE:
+  1. **NÃO fazer nova consulta** (queryUsers)
+  2. **NÃO tentar criar usuário** (createUser)
+  3. **NÃO pedir mais informações**
+  4. **Responder diretamente** com a informação que você já retornou no histórico
+- **Responda de forma concisa**: apenas a informação solicitada, sem explicações longas
+- Exemplos:
+  - Se você retornou "Operação: PARTNER" e o usuário pergunta "Ele é de qual operação?", responda apenas "PARTNER"
+  - Se você retornou "CPF: 000.000.000-00" e o usuário pergunta "E qual seu CPF?", responda apenas "000.000.000-00"
+  - Se você retornou "Email: luiz.eri@partnergroup.com.br" e o usuário pergunta "Qual o email dele?", responda apenas "luiz.eri@partnergroup.com.br"
+- **NUNCA** interprete perguntas sobre dados de um usuário já consultado como solicitação para criar novo usuário
+- Mantenha o contexto da conversa: se você acabou de consultar um usuário e o usuário pergunta algo sobre "ele", "seu", "dele", etc., você deve entender que se refere ao último usuário consultado e responder com os dados que você já retornou
 
 🚨 REGRA CRÍTICA - PRIORIZAR CRIAÇÃO DE USUÁRIO:
 Quando o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário", "criar um usuário", "novo usuário":
@@ -556,9 +576,21 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 
 ## 3. Consultas de Usuários (queryUsers)
 - Use \`queryUsers\` para contagens e listagens. Admitido filtros naturais: empresa (operation/company), período (\`date_from/date_to\` em PT-BR), perfil, grupo, status, login, CPF.
-- Para “Usuários incluídos esta semana” use \`{ date_from: "semana atual" }\`.
+- Para "Usuários incluídos esta semana" use \`{ date_from: "semana atual" }\`.
 - Sempre respeite RBAC: se o solicitante não puder ver certo escopo, retorne mensagem orientando a falta de permissão.
 - Resultados devem trazer contagem total, resumo e, quando aplicável, auditId.
+- **CONTEXTO CRÍTICO - PERGUNTAS DE FOLLOW-UP**:
+  - Quando você retornar dados de um usuário específico (ex: "Dados do Usuário: Operação: PARTNER, CPF: 000.000.000-00") e o usuário fizer QUALQUER pergunta de follow-up sobre "ele", "ela", "seu", "dele", "dela", "esse usuário", "qual operação", "qual grupo", "qual CPF", "qual email", "qual login", etc., você DEVE:
+    1. **NÃO usar queryUsers novamente** - você já tem os dados no histórico
+    2. **NÃO usar createUser** - isso é para criar novo usuário, não para responder sobre usuário já consultado
+    3. **NÃO pedir mais informações** - você já tem tudo no histórico
+    4. **Responder diretamente e de forma concisa** com a informação que você já retornou
+  - Exemplos de perguntas de follow-up que devem ser respondidas com dados do histórico:
+    - "Ele é de qual operação?" → Responda apenas "PARTNER"
+    - "E qual seu CPF?" → Responda apenas "000.000.000-00"
+    - "Qual o email dele?" → Responda apenas o email que você já retornou
+    - "Qual o grupo?" → Responda apenas o grupo que você já retornou
+  - **NUNCA** interprete perguntas sobre dados de um usuário já consultado como solicitação para criar novo usuário
 
 ## 4. Relatórios
 ⚠️ **IMPORTANTE**: Se o usuário pedir para "criar usuário", "cadastrar usuário", "adicionar usuário" → use \`createUser\`. NÃO crie relatórios!
@@ -623,27 +655,78 @@ O CPF é obrigatório para criar um usuário. Ex: Criar usuário: João Silva, C
 - **"Gerar relatório de auditoria"** → \`generateReport({ type: "audit" })\` - Gera CSV de logs de auditoria!
 
 Seja extremamente rigoroso: valide permissão, confirme parâmetros, peça confirmação quando a ação for sensível e sempre retorne status + resumo + auditId.`
-                },
-                { role: "user", content: securityResult.sanitizedMessage }
-            ],
+            }
+        ];
+
+        // Adicionar histórico de conversa (se houver)
+        if (limitedHistory && limitedHistory.length > 0) {
+            // Validar formato do histórico: deve ter role e content
+            const validHistory = limitedHistory
+                .filter(msg => msg && msg.role && msg.content)
+                .map(msg => ({
+                    role: msg.role, // 'user' ou 'assistant'
+                    content: msg.content
+                }));
+            messages.push(...validHistory);
+            console.log('[OPENAI] Histórico adicionado:', validHistory.length, 'mensagens');
+            console.log('[OPENAI] Últimas mensagens do histórico:', validHistory.slice(-4).map(m => `${m.role}: ${m.content.substring(0, 50)}...`));
+        } else {
+            console.log('[OPENAI] Nenhum histórico fornecido');
+        }
+
+        // Adicionar mensagem atual do usuário
+        messages.push({
+            role: "user",
+            content: securityResult.sanitizedMessage
+        });
+
+        const completion = await openai.chat.completions.create({
+            model: "gpt-3.5-turbo",
+            messages: messages,
             tools: TOOLS,
             tool_choice: "auto"
         });
 
         const responseMessage = completion.choices[0].message;
 
+        // Construir histórico atualizado para retornar ao frontend
+        const updatedHistory = [...limitedHistory];
+        
+        // Adicionar mensagem do usuário ao histórico (apenas se ainda não estiver)
+        const lastUserMessage = updatedHistory[updatedHistory.length - 1];
+        if (!lastUserMessage || lastUserMessage.role !== 'user' || lastUserMessage.content !== securityResult.sanitizedMessage) {
+            updatedHistory.push({
+                role: 'user',
+                content: securityResult.sanitizedMessage
+            });
+        }
+
         if (responseMessage.tool_calls) {
+            // Para tool calls, manter o histórico atualizado com a mensagem do usuário
+            // A resposta da tool será adicionada ao histórico quando processada no backend
+            console.log('[OPENAI] Tool call detectado. Histórico atualizado com mensagem do usuário:', updatedHistory.length, 'mensagens');
             return {
                 type: 'TOOL_CALL',
-                toolCalls: responseMessage.tool_calls
+                toolCalls: responseMessage.tool_calls,
+                history: updatedHistory
             };
         }
 
         const safeContent = redactSensitiveOutput(responseMessage.content);
 
+        // Adicionar resposta da IA ao histórico (apenas se ainda não estiver)
+        const lastAssistantMessage = updatedHistory[updatedHistory.length - 1];
+        if (!lastAssistantMessage || lastAssistantMessage.role !== 'assistant' || lastAssistantMessage.content !== safeContent) {
+            updatedHistory.push({
+                role: 'assistant',
+                content: safeContent
+            });
+        }
+
         return {
             type: 'MESSAGE',
-            content: safeContent
+            content: safeContent,
+            history: updatedHistory
         };
 
     } catch (error) {

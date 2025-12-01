@@ -11,6 +11,7 @@ const rbacHelper = require('./helpers/rbacHelper');
 const profileHelper = require('./helpers/profileHelper');
 const entityHelper = require('./helpers/entityHelper');
 const { createCustomReport, getCustomReport, getAllCustomReports } = require('./middleware/customReportsStore');
+const { getConversationHistory, saveConversationHistory, getFullConversationHistory, cleanupOldMessages, getHistoryStats, REDIS_TTL_SECONDS, DB_RETENTION_DAYS } = require('./middleware/conversationHistoryStore');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -120,6 +121,34 @@ const testDbConnection = async () => {
             }
         } catch (tableErr) {
             console.error('⚠️  Erro ao verificar/criar tabela audit_logs:', tableErr.message);
+        }
+
+        // Verificar e criar tabela conversation_history se não existir
+        try {
+            const tableExists = await db.query(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'conversation_history')"
+            );
+            
+            if (!tableExists.rows[0]?.exists) {
+                console.log('📋 Criando tabela conversation_history...');
+                await db.query(`
+                    CREATE TABLE conversation_history (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        role VARCHAR(20) NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                // Criar índices separadamente
+                await db.query(`CREATE INDEX IF NOT EXISTS idx_conversation_user_id ON conversation_history(user_id)`);
+                await db.query(`CREATE INDEX IF NOT EXISTS idx_conversation_created_at ON conversation_history(created_at)`);
+                console.log('✅ Tabela conversation_history criada com sucesso');
+            } else {
+                console.log('✅ Tabela conversation_history já existe');
+            }
+        } catch (tableErr) {
+            console.error('⚠️  Erro ao verificar/criar tabela conversation_history:', tableErr.message);
         }
     } catch (err) {
         console.error('⚠️  Database connection failed:', err.message);
@@ -708,18 +737,82 @@ app.post('/api/chat', async (req, res) => {
             return res.status(400).json({ error: 'Message is required' });
         }
 
-        // Process message with OpenAI
-        const aiResponse = await processMessage(message);
+        // Obter userId do header ou do middleware
+        const userId = req.currentUserId;
+        console.log('[CHAT API] 📨 Recebida mensagem:', message.substring(0, 50), 'User ID:', userId);
+
+        // Obter histórico do Redis/Banco (ou memória como fallback)
+        let conversationHistory = await getConversationHistory(userId);
+        console.log('[CHAT API] 📚 Histórico obtido:', conversationHistory.length, 'mensagens');
+        if (conversationHistory.length > 0) {
+            console.log('[CHAT API] 📝 Últimas mensagens do histórico:', conversationHistory.slice(-4).map(m => `${m.role}: ${m.content?.substring(0, 50)}...`));
+        } else {
+            console.log('[CHAT API] ⚠️ NENHUM histórico encontrado para user', userId);
+        }
+
+        // Process message with OpenAI (usando histórico do Redis)
+        const aiResponse = await processMessage(message, conversationHistory);
+        
+        // Função auxiliar para construir histórico atualizado com a resposta e salvar no Redis
+        const buildUpdatedHistory = async (assistantMessage) => {
+            // Usar histórico do aiResponse se disponível (já contém mensagem do usuário)
+            // Caso contrário, usar conversationHistory e adicionar mensagem do usuário
+            let updatedHistory;
+            if (aiResponse.history && Array.isArray(aiResponse.history) && aiResponse.history.length > 0) {
+                updatedHistory = [...aiResponse.history];
+                console.log('[CHAT API] buildUpdatedHistory: ✅ Usando histórico do aiResponse, tamanho:', updatedHistory.length);
+            } else {
+                updatedHistory = [...conversationHistory];
+                // Adicionar mensagem do usuário se ainda não estiver no histórico
+                const lastMessage = updatedHistory[updatedHistory.length - 1];
+                if (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== message) {
+                    updatedHistory.push({
+                        role: 'user',
+                        content: message
+                    });
+                }
+                console.log('[CHAT API] buildUpdatedHistory: ⚠️ Usando conversationHistory, tamanho após adicionar user:', updatedHistory.length);
+            }
+            // Adicionar resposta da IA ao histórico (evitar duplicatas)
+            if (assistantMessage) {
+                const lastMessage = updatedHistory[updatedHistory.length - 1];
+                if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.content !== assistantMessage) {
+                    updatedHistory.push({
+                        role: 'assistant',
+                        content: assistantMessage
+                    });
+                    console.log('[CHAT API] buildUpdatedHistory: ✅ Adicionada resposta assistant, tamanho final:', updatedHistory.length);
+                } else {
+                    console.log('[CHAT API] buildUpdatedHistory: ⚠️ Resposta assistant já existe no histórico, ignorando duplicata');
+                }
+            }
+            // Salvar histórico atualizado no Redis e banco
+            await saveConversationHistory(userId, updatedHistory);
+            console.log('[CHAT API] buildUpdatedHistory: 💾 Histórico salvo no Redis/DB para user', userId);
+            return updatedHistory;
+        };
 
         if (aiResponse.type === 'ERROR') {
-            return res.status(500).json({ type: 'ERROR', message: aiResponse.message });
+            const errorHistory = await buildUpdatedHistory(aiResponse.message || 'Erro ao processar mensagem');
+            return res.status(500).json({ 
+                type: 'ERROR', 
+                message: aiResponse.message,
+                history: errorHistory
+            });
         }
 
         if (aiResponse.type === 'MESSAGE') {
-            return res.json({ type: 'TEXT', content: aiResponse.content });
+            const messageHistory = await buildUpdatedHistory(aiResponse.content);
+            return res.json({ 
+                type: 'TEXT', 
+                content: aiResponse.content,
+                history: messageHistory
+            });
         }
 
         if (aiResponse.type === 'TOOL_CALL') {
+            console.log('[CHAT API] Tool call detectado:', aiResponse.toolCalls[0].function.name);
+            console.log('[CHAT API] Histórico do aiResponse:', aiResponse.history?.length || 0, 'mensagens');
             const toolCall = aiResponse.toolCalls[0];
             let fnName = toolCall.function.name;
             let args;
@@ -1039,11 +1132,13 @@ app.post('/api/chat', async (req, res) => {
                     });
                     const auditLabel = formatAuditId(auditDbId);
 
+                    const successMessage = `Usuário cadastrado com sucesso! Login: ${result.rows[0].login}. Audit ID: ${auditLabel}`;
                     return res.json({
                         type: 'ACTION_COMPLETE',
-                        message: `Usuário cadastrado com sucesso! Login: ${result.rows[0].login}. Audit ID: ${auditLabel}`,
+                        message: successMessage,
                         auditId: auditLabel,
-                        data: result.rows[0]
+                        data: result.rows[0],
+                        history: await buildUpdatedHistory(successMessage)
                     });
                 } catch (err) {
                     if (err.code === '23505') { // Duplicate key error
@@ -1219,9 +1314,11 @@ app.post('/api/chat', async (req, res) => {
                         count_only: true
                     });
                     const auditLabel = formatAuditId(auditDbId);
+                    const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                     return res.json({
                         type: 'TEXT',
-                        content: `${message}\nAudit ID: ${auditLabel}`
+                        content: textResponse,
+                        history: await buildUpdatedHistory(textResponse)
                     });
                 } else {
                     const query = `SELECT DISTINCT
@@ -1255,9 +1352,11 @@ app.post('/api/chat', async (req, res) => {
                         if (filters.operation) {
                             message = `Nenhum usuário encontrado para a operação "${filters.operation}".`;
                         }
+                        const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                         return res.json({
                             type: 'TEXT',
-                            content: `${message}\nAudit ID: ${auditLabel}`
+                            content: textResponse,
+                            history: await buildUpdatedHistory(textResponse)
                         });
                     }
 
@@ -1284,9 +1383,11 @@ app.post('/api/chat', async (req, res) => {
                         }
                         response += '------------------------------------------';
 
+                        const textResponse = `${response}\nAudit ID: ${auditLabel}`;
                         return res.json({
                             type: 'TEXT',
-                            content: `${response}\nAudit ID: ${auditLabel}`
+                            content: textResponse,
+                            history: await buildUpdatedHistory(textResponse)
                         });
                     }
 
@@ -1313,9 +1414,11 @@ app.post('/api/chat', async (req, res) => {
                     if (filters.operation) {
                         message = `Encontrados ${result.rows.length} usuário(s) da operação "${filters.operation}":\n${userList}`;
                     }
+                    const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                     return res.json({
                         type: 'TEXT',
-                        content: `${message}\nAudit ID: ${auditLabel}`
+                        content: textResponse,
+                        history: await buildUpdatedHistory(textResponse)
                     });
                 }
             }
@@ -3631,6 +3734,109 @@ app.get('/api/reports/generate', async (req, res) => {
     } catch (error) {
         console.error('Erro ao gerar relatório:', error);
         res.status(500).json({ error: 'Erro ao gerar relatório', message: error.message });
+    }
+});
+
+// GET /api/conversations/history - Obter histórico completo de conversas do usuário
+app.get('/api/conversations/history', async (req, res) => {
+    try {
+        const userId = req.currentUserId;
+        const limit = parseInt(req.query.limit) || 50;
+        const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+        const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+
+        // Buscar histórico do Redis primeiro (mais rápido)
+        let history = await getConversationHistory(userId, limit);
+        
+        // Se não encontrou no Redis, buscar do banco
+        if (history.length === 0) {
+            history = await getFullConversationHistory(userId, limit, startDate, endDate);
+        }
+
+        // Converter para formato do frontend (com id e type)
+        const formattedHistory = history.map((msg, index) => ({
+            id: index + 1,
+            type: msg.role === 'user' ? 'user' : 'bot',
+            text: msg.content,
+            role: msg.role,
+            content: msg.content
+        }));
+
+        res.json({
+            success: true,
+            userId,
+            count: formattedHistory.length,
+            messages: formattedHistory,
+            history: history // Manter formato original também
+        });
+    } catch (error) {
+        console.error('Erro ao buscar histórico de conversas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao buscar histórico', 
+            message: error.message 
+        });
+    }
+});
+
+// DELETE /api/conversations/history - Limpar histórico de conversas do usuário
+app.delete('/api/conversations/history', async (req, res) => {
+    try {
+        const userId = req.currentUserId;
+        const { clearConversationHistory } = require('./middleware/conversationHistoryStore');
+        
+        await clearConversationHistory(userId);
+
+        res.json({
+            success: true,
+            message: 'Histórico de conversas limpo com sucesso'
+        });
+    } catch (error) {
+        console.error('Erro ao limpar histórico de conversas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao limpar histórico', 
+            message: error.message 
+        });
+    }
+});
+
+// GET /api/conversations/stats - Obter estatísticas do histórico
+app.get('/api/conversations/stats', async (req, res) => {
+    try {
+        const userId = req.query.userId ? parseInt(req.query.userId) : null;
+        const stats = await getHistoryStats(userId);
+        
+        res.json({
+            success: true,
+            stats,
+            config: {
+                redisTTL: REDIS_TTL_SECONDS,
+                dbRetentionDays: DB_RETENTION_DAYS || 'Permanente'
+            }
+        });
+    } catch (error) {
+        console.error('Erro ao obter estatísticas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao obter estatísticas', 
+            message: error.message 
+        });
+    }
+});
+
+// POST /api/conversations/cleanup - Limpar mensagens antigas (requer permissão de admin)
+app.post('/api/conversations/cleanup', async (req, res) => {
+    try {
+        const result = await cleanupOldMessages();
+        res.json({
+            success: true,
+            message: `Limpeza concluída: ${result.deleted} mensagens removidas`,
+            deleted: result.deleted
+        });
+    } catch (error) {
+        console.error('Erro ao limpar mensagens antigas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao limpar mensagens antigas', 
+            message: error.message 
+        });
     }
 });
 
