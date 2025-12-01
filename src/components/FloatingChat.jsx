@@ -12,6 +12,9 @@ const FloatingChat = () => {
     const [messages, setMessages] = useState([
         { id: 1, type: 'bot', text: 'Olá! Como posso ajudar você hoje?' }
     ]);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+    // Histórico de conversa para contexto da IA (formato OpenAI: [{ role: 'user'|'assistant', content: string }])
+    const [conversationHistory, setConversationHistory] = useState([]);
     const [pendingAction, setPendingAction] = useState(null);
     const [previewData, setPreviewData] = useState(null);
     const [isTyping, setIsTyping] = useState(false);
@@ -27,6 +30,79 @@ const FloatingChat = () => {
     useEffect(() => {
         scrollToBottom();
     }, [messages, isOpen]);
+
+    // Carregar histórico quando o chat é aberto
+    useEffect(() => {
+        const loadConversationHistory = async () => {
+            if (!isOpen || !user || !user.id || isLoadingHistory) return;
+
+            setIsLoadingHistory(true);
+            try {
+                console.log('[FloatingChat] Carregando histórico para user:', user.id);
+                const authHeaders = { 'x-user-id': user.id.toString() };
+                const response = await fetch('/api/conversations/history?limit=20', {
+                    headers: authHeaders
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('[FloatingChat] Histórico recebido:', data.count, 'mensagens');
+                    
+                    if (data.messages && data.messages.length > 0) {
+                        // Converter histórico do servidor para formato do componente
+                        // Remover duplicatas baseado no conteúdo
+                        const seenMessages = new Set();
+                        const historyMessages = data.messages
+                            .filter((msg) => {
+                                const key = `${msg.role || msg.type}:${msg.content || msg.text}`;
+                                if (seenMessages.has(key)) {
+                                    return false; // Duplicata, ignorar
+                                }
+                                seenMessages.add(key);
+                                return true;
+                            })
+                            .map((msg, index) => ({
+                                id: msg.id || Date.now() + index,
+                                type: msg.type || (msg.role === 'user' ? 'user' : 'bot'),
+                                text: msg.text || msg.content || ''
+                            }));
+
+                        console.log('[FloatingChat] Carregando', historyMessages.length, 'mensagens do histórico (duplicatas removidas)');
+                        setMessages(historyMessages);
+
+                        // Atualizar histórico de conversa para contexto da IA
+                        if (data.history && Array.isArray(data.history)) {
+                            // Remover duplicatas do histórico também
+                            const seenHistory = new Set();
+                            const uniqueHistory = data.history.filter((msg) => {
+                                const key = `${msg.role}:${msg.content}`;
+                                if (seenHistory.has(key)) {
+                                    return false;
+                                }
+                                seenHistory.add(key);
+                                return true;
+                            });
+                            console.log('[FloatingChat] Atualizando conversationHistory com', uniqueHistory.length, 'mensagens únicas');
+                            setConversationHistory(uniqueHistory);
+                        }
+                    } else {
+                        // Se não há histórico, manter mensagem de boas-vindas
+                        console.log('[FloatingChat] Nenhum histórico encontrado, mantendo mensagem de boas-vindas');
+                    }
+                } else {
+                    console.error('[FloatingChat] Erro ao buscar histórico:', response.status);
+                }
+            } catch (error) {
+                console.error('[FloatingChat] Erro ao carregar histórico:', error);
+            } finally {
+                setIsLoadingHistory(false);
+            }
+        };
+
+        if (isOpen) {
+            loadConversationHistory();
+        }
+    }, [isOpen, user]);
 
     const handleSend = () => {
         if (!inputValue.trim()) return;
@@ -105,11 +181,60 @@ const FloatingChat = () => {
             };
             
             console.log('[FloatingChat] Criando headers diretamente do user.id:', authHeaders, 'User ID:', userId, 'User completo:', user);
-            console.log('[FloatingChat] Chamando processCommandWithAI com:', { text, authHeaders });
-            const response = await processCommandWithAI(text, authHeaders);
+            console.log('[FloatingChat] Chamando processCommandWithAI com:', { text, authHeaders, historyLength: conversationHistory.length });
+            console.log('[FloatingChat] Histórico completo sendo enviado:', JSON.stringify(conversationHistory, null, 2));
+            const response = await processCommandWithAI(text, authHeaders, conversationHistory);
+            console.log('[FloatingChat] Resposta recebida:', response.type);
+            console.log('[FloatingChat] Resposta completa:', JSON.stringify(response, null, 2));
+            console.log('[FloatingChat] Histórico na resposta:', response.history?.length || 0, 'mensagens');
+            if (response.history) {
+                console.log('[FloatingChat] Últimas mensagens do histórico recebido:', response.history.slice(-2));
+            }
             
             // Parar animação de digitando
             setIsTyping(false);
+
+            // Atualizar histórico de conversa se fornecido pelo servidor
+            if (response.history && Array.isArray(response.history) && response.history.length > 0) {
+                console.log('[FloatingChat] ✅ Atualizando histórico do servidor:', response.history.length, 'mensagens');
+                console.log('[FloatingChat] Últimas mensagens do histórico recebido:', response.history.slice(-2).map(m => `${m.role}: ${m.content?.substring(0, 50)}...`));
+                setConversationHistory(response.history);
+                console.log('[FloatingChat] ✅ Histórico atualizado no estado');
+            } else {
+                console.log('[FloatingChat] ⚠️ Nenhum histórico recebido do servidor ou histórico vazio, atualizando manualmente');
+                console.log('[FloatingChat] Response.history:', response.history);
+                console.log('[FloatingChat] Response.history é array?', Array.isArray(response.history));
+                console.log('[FloatingChat] Response.history length:', response.history?.length);
+                // Se não veio histórico, atualizar manualmente
+                setConversationHistory(prev => {
+                    const updated = [...prev, { role: 'user', content: text }];
+                    // Adicionar resposta da IA ao histórico baseado no tipo
+                    let assistantMessage = null;
+                    if (response.type === 'TEXT' && response.content) {
+                        assistantMessage = response.content;
+                    } else if (response.type === 'ACTION_COMPLETE' && response.message) {
+                        assistantMessage = response.message;
+                    } else if (response.type === 'CUSTOM_REPORT_CREATED' && response.message) {
+                        assistantMessage = response.message;
+                    } else if (response.type === 'CONFIRMATION_REQUIRED' && response.message) {
+                        assistantMessage = response.message;
+                    } else if (response.type === 'REPORT_READY' && response.message) {
+                        assistantMessage = response.message;
+                    } else if (response.type === 'ERROR' && response.message) {
+                        assistantMessage = `Erro: ${response.message}`;
+                    } else if (response.message) {
+                        assistantMessage = response.message;
+                    } else if (response.content) {
+                        assistantMessage = response.content;
+                    }
+                    
+                    if (assistantMessage) {
+                        updated.push({ role: 'assistant', content: assistantMessage });
+                    }
+                    // Limitar histórico a 20 mensagens (10 pares user/assistant) para controlar tokens
+                    return updated.slice(-20);
+                });
+            }
 
             if (response.type === 'TEXT') {
                 setMessages(prev => [...prev, {
@@ -252,6 +377,11 @@ const FloatingChat = () => {
 
                 {/* Chat Body */}
                 <div className="flex-1 bg-slate-50/50 p-4 overflow-y-auto">
+                    {isLoadingHistory && (
+                        <div className="flex justify-center items-center py-4">
+                            <div className="text-sm text-slate-500">Carregando histórico...</div>
+                        </div>
+                    )}
                     {messages.map((msg) => (
                         <div key={msg.id} className={clsx("flex gap-3 mb-4", msg.type === 'user' ? "flex-row-reverse" : "")}>
                             <div className={clsx(

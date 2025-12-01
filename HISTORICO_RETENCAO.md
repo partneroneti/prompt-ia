@@ -1,0 +1,219 @@
+# 📚 Configuração de Retenção do Histórico de Conversas
+
+## 🔌 Configuração do Redis
+
+### Redis Local vs Remoto
+
+O sistema suporta tanto Redis local quanto remoto (da empresa/cloud). Configure via variável de ambiente:
+
+#### Redis Local (Desenvolvimento)
+```bash
+# Redis local na porta padrão
+REDIS_URL=redis://localhost:6379
+
+# Redis local em porta customizada
+REDIS_URL=redis://localhost:6380
+```
+
+#### Redis Remoto (Produção/Empresa)
+```bash
+# Redis remoto sem autenticação
+REDIS_URL=redis://redis.empresa.com:6379
+
+# Redis remoto com senha
+REDIS_URL=redis://senha@redis.empresa.com:6379
+
+# Redis remoto com usuário e senha
+REDIS_URL=redis://usuario:senha@redis.empresa.com:6379
+
+# Redis remoto com SSL/TLS (rediss://)
+REDIS_URL=rediss://usuario:senha@redis.empresa.com:6380
+
+# Redis Cloud (ex: Redis Cloud, AWS ElastiCache)
+REDIS_URL=redis://default:senha@redis-12345.c1.us-east-1-1.ec2.cloud.redislabs.com:12345
+```
+
+#### Exemplos de Provedores Cloud
+
+**Redis Cloud:**
+```bash
+REDIS_URL=redis://default:senha@redis-12345.c1.us-east-1-1.ec2.cloud.redislabs.com:12345
+```
+
+**AWS ElastiCache:**
+```bash
+REDIS_URL=redis://master.abc123.0001.use1.cache.amazonaws.com:6379
+```
+
+**Azure Cache for Redis:**
+```bash
+REDIS_URL=rediss://nome-cache.redis.cache.windows.net:6380?ssl=true
+# Com senha: rediss://:senha@nome-cache.redis.cache.windows.net:6380
+```
+
+**Google Cloud Memorystore:**
+```bash
+REDIS_URL=redis://10.0.0.1:6379
+```
+
+### Configuração no .env
+
+Adicione no arquivo `.env` na raiz do projeto:
+
+```bash
+# Redis da empresa (exemplo)
+REDIS_URL=redis://usuario:senha@redis.empresa.com:6379
+
+# Ou Redis local para desenvolvimento
+# REDIS_URL=redis://localhost:6379
+```
+
+**⚠️ Importante:**
+- Não commite o arquivo `.env` com credenciais no Git
+- Use variáveis de ambiente no servidor de produção
+- Para Redis com SSL, use `rediss://` ao invés de `redis://`
+
+### Fallback Automático
+
+Se o Redis não estiver disponível (local ou remoto), o sistema automaticamente:
+1. Tenta conectar ao Redis configurado
+2. Se falhar, usa armazenamento em memória (apenas durante a sessão)
+3. Continua salvando no banco de dados PostgreSQL (permanente)
+
+## ⏱️ Duração Atual das Mensagens
+
+### Redis (Cache Rápido)
+- **Duração**: 1 hora (3600 segundos)
+- **Propósito**: Cache rápido para acesso imediato
+- **O que acontece**: Após 1 hora, o cache expira, mas as mensagens permanecem no banco de dados
+
+### Banco de Dados (Persistência)
+- **Duração**: **PERMANENTE** (sem expiração automática)
+- **Propósito**: Armazenamento permanente de todas as conversas
+- **O que acontece**: As mensagens ficam salvas indefinidamente até serem removidas manualmente
+
+## ⚙️ Como Configurar a Retenção
+
+### 1. Configurar TTL do Redis (Cache)
+
+Adicione no arquivo `.env`:
+
+```bash
+# TTL do Redis em segundos (padrão: 3600 = 1 hora)
+REDIS_HISTORY_TTL_SECONDS=3600
+
+# Exemplos:
+# 30 minutos: REDIS_HISTORY_TTL_SECONDS=1800
+# 2 horas: REDIS_HISTORY_TTL_SECONDS=7200
+# 24 horas: REDIS_HISTORY_TTL_SECONDS=86400
+```
+
+### 2. Configurar Retenção no Banco de Dados
+
+Adicione no arquivo `.env`:
+
+```bash
+# Número de dias para manter mensagens no banco (null = permanente)
+DB_HISTORY_RETENTION_DAYS=30
+
+# Exemplos:
+# 7 dias: DB_HISTORY_RETENTION_DAYS=7
+# 30 dias: DB_HISTORY_RETENTION_DAYS=30
+# 90 dias: DB_HISTORY_RETENTION_DAYS=90
+# Permanente (sem limpeza): Não defina ou defina como null
+```
+
+**⚠️ Importante**: Se `DB_HISTORY_RETENTION_DAYS` não for definido ou for `null`, as mensagens ficam **permanentes** no banco.
+
+### 3. Limpeza Automática (Opcional)
+
+Para ativar limpeza automática, você pode:
+
+1. **Configurar um cron job** para chamar a API de limpeza:
+```bash
+# Executar limpeza diariamente às 2h da manhã
+0 2 * * * curl -X POST http://localhost:3001/api/conversations/cleanup
+```
+
+2. **Ou criar um script Node.js** para executar periodicamente:
+```javascript
+const { cleanupOldMessages } = require('./server/middleware/conversationHistoryStore');
+
+// Executar limpeza
+cleanupOldMessages().then(result => {
+    console.log(`Limpeza concluída: ${result.deleted} mensagens removidas`);
+});
+```
+
+## 📊 Verificar Estatísticas
+
+### Via API
+
+```bash
+# Estatísticas gerais
+curl http://localhost:3001/api/conversations/stats
+
+# Estatísticas de um usuário específico
+curl "http://localhost:3001/api/conversations/stats?userId=220"
+```
+
+### Resposta da API
+
+```json
+{
+  "success": true,
+  "stats": {
+    "total": 150,
+    "oldest": "2025-01-15T10:30:00Z",
+    "newest": "2025-01-20T14:45:00Z",
+    "retentionDays": "30",
+    "redisTTL": "3600s (60 minutos)"
+  },
+  "config": {
+    "redisTTL": 3600,
+    "dbRetentionDays": 30
+  }
+}
+```
+
+## 🗑️ Limpar Mensagens Antigas Manualmente
+
+### Via API
+
+```bash
+# Limpar mensagens antigas (baseado em DB_RETENTION_DAYS)
+curl -X POST http://localhost:3001/api/conversations/cleanup
+```
+
+### Limpar Histórico de um Usuário Específico
+
+```bash
+# Limpar histórico de um usuário (apenas cache Redis)
+curl -X DELETE http://localhost:3001/api/conversations/history \
+  -H "x-user-id: 220"
+```
+
+## 📝 Resumo
+
+| Armazenamento | Duração Padrão | Configurável | Limpeza Automática |
+|--------------|----------------|--------------|-------------------|
+| **Redis** | 1 hora | ✅ Sim (via `REDIS_HISTORY_TTL_SECONDS`) | ✅ Sim (automático) |
+| **Banco de Dados** | Permanente | ✅ Sim (via `DB_HISTORY_RETENTION_DAYS`) | ⚠️ Manual (via API) |
+
+## 💡 Recomendações
+
+1. **Para desenvolvimento**: Mantenha `DB_HISTORY_RETENTION_DAYS` como `null` (permanente)
+2. **Para produção**: Configure `DB_HISTORY_RETENTION_DAYS=30` (30 dias) e ative limpeza automática
+3. **Para compliance/LGPD**: Configure retenção adequada conforme política da empresa
+4. **Redis TTL**: Mantenha entre 1-24 horas dependendo do uso
+
+## 🔍 Verificar Configuração Atual
+
+Após reiniciar o servidor, você verá nos logs:
+
+```
+[HISTORY] Configuração de retenção:
+  - Redis TTL: 3600 segundos (60 minutos)
+  - DB Retention: Permanente (sem limpeza automática)
+```
+

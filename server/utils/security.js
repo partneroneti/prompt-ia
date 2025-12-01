@@ -14,9 +14,13 @@ const SENSITIVE_REQUEST_PATTERNS = [
     /\bdump\b.*\b(bd|db|database)/i,
     /\bddl\b/i,
     /create\s+table/i,
-    /senha[s]?/i,
-    /passwords?/i,
-    /hash\s+de\s+senha/i
+    // Bloquear apenas consultas/revelações de senha, não comandos de ação
+    /(mostrar|exibir|listar|consultar|ver|buscar|encontrar|pegar|obter|retornar|revelar|mostre|exiba|liste|consulte|veja|busque|encontre|pegue|obtenha|retorne|revele).*senha/i,
+    /senha.*(mostrar|exibir|listar|consultar|ver|buscar|encontrar|pegar|obter|retornar|revelar|mostre|exiba|liste|consulte|veja|busque|encontre|pegue|obtenha|retorne|revele)/i,
+    /(mostrar|exibir|listar|consultar|ver|buscar|encontrar|pegar|obter|retornar|revelar|mostre|exiba|liste|consulte|veja|busque|encontre|pegue|obtenha|retorne|revele).*password/i,
+    /password.*(mostrar|exibir|listar|consultar|ver|buscar|encontrar|pegar|obter|retornar|revelar|mostre|exiba|liste|consulte|veja|busque|encontre|pegue|obtenha|retorne|revele)/i,
+    /hash\s+de\s+senha/i,
+    /senha\s+hash/i
 ];
 
 const SENSITIVE_OUTPUT_PATTERNS = [

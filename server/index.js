@@ -1,6 +1,7 @@
 require('dotenv').config({ path: '../.env' });
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const db = require('./db');
 const fs = require('fs');
 const path = require('path');
@@ -12,6 +13,48 @@ const rbacHelper = require('./helpers/rbacHelper');
 const profileHelper = require('./helpers/profileHelper');
 const entityHelper = require('./helpers/entityHelper');
 const { createCustomReport, getCustomReport, getAllCustomReports } = require('./middleware/customReportsStore');
+const { getConversationHistory, saveConversationHistory, getFullConversationHistory, cleanupOldMessages, getHistoryStats, REDIS_TTL_SECONDS, DB_RETENTION_DAYS } = require('./middleware/conversationHistoryStore');
+
+/**
+ * Função helper para gerar hash SHA-256 de uma senha
+ * @param {string} password - Senha em texto plano
+ * @returns {string} - Hash SHA-256 em hexadecimal (minúsculas)
+ */
+function hashPasswordSHA256(password) {
+    return crypto.createHash('sha256').update(password).digest('hex');
+}
+
+/**
+ * Senha temporária fixa usada para reset de senha
+ * Quando a senha é resetada, sempre usamos esta senha temporária
+ * O sistema detecta se a senha atual é esta temporária para mostrar o modal
+ */
+const TEMP_PASSWORD = 'TEMP_RESET_PASSWORD_2024';
+
+/**
+ * Função helper para gerar senha aleatória
+ * @param {number} length - Tamanho da senha (padrão: 12)
+ * @returns {string} - Senha aleatória
+ */
+function generateRandomPassword(length = 12) {
+    const charset = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*';
+    let password = '';
+    for (let i = 0; i < length; i++) {
+        password += charset.charAt(Math.floor(Math.random() * charset.length));
+    }
+    return password;
+}
+
+/**
+ * Verifica se uma senha (hash) é a senha temporária de reset
+ * @param {string} passwordHash - Hash SHA-256 da senha
+ * @returns {boolean} - True se for a senha temporária
+ */
+function isTempPassword(passwordHash) {
+    if (!passwordHash) return false;
+    const tempPasswordHash = hashPasswordSHA256(TEMP_PASSWORD);
+    return passwordHash === tempPasswordHash;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -131,6 +174,35 @@ const testDbConnection = async () => {
                 console.error('⚠️  Erro ao verificar/criar tabela audit_logs:', tableErr.message);
             }
         }
+
+        // Verificar e criar tabela conversation_history se não existir
+        try {
+            const tableExists = await db.query(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'conversation_history')"
+            );
+            
+            if (!tableExists.rows[0]?.exists) {
+                console.log('📋 Criando tabela conversation_history...');
+                await db.query(`
+                    CREATE TABLE conversation_history (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL,
+                        role VARCHAR(20) NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                `);
+                // Criar índices separadamente
+                await db.query(`CREATE INDEX IF NOT EXISTS idx_conversation_user_id ON conversation_history(user_id)`);
+                await db.query(`CREATE INDEX IF NOT EXISTS idx_conversation_created_at ON conversation_history(created_at)`);
+                console.log('✅ Tabela conversation_history criada com sucesso');
+            } else {
+                console.log('✅ Tabela conversation_history já existe');
+            }
+        } catch (tableErr) {
+            console.error('⚠️  Erro ao verificar/criar tabela conversation_history:', tableErr.message);
+        }
+
     } catch (err) {
         console.error('⚠️  Database connection failed:', err.message);
         console.log('⚠️  Server will run but database operations will fail');
@@ -219,9 +291,9 @@ app.get('/api/auth/user/:id', async (req, res) => {
     try {
         const { id } = req.params;
         
-        // Buscar informações do usuário
+        // Buscar informações do usuário e verificar se precisa trocar senha (usando str_senha)
         const userResult = await db.query(
-            `SELECT id_usuario, str_descricao, str_login, email, str_cpf, str_ativo, bloqueado
+            `SELECT id_usuario, str_descricao, str_login, email, str_cpf, str_ativo, bloqueado, str_senha
              FROM tb_usuario 
              WHERE id_usuario = $1 AND str_ativo = 'A' AND bloqueado = false`,
             [id]
@@ -232,6 +304,24 @@ app.get('/api/auth/user/:id', async (req, res) => {
         }
 
         const user = userResult.rows[0];
+        
+        // Verificar se a senha atual é a senha temporária (indica que precisa trocar)
+        // Quando resetar senha, armazenamos TEMP_PASSWORD para detectar que precisa trocar
+        const needsPasswordChange = isTempPassword(user.str_senha);
+        
+        const tempPasswordHash = hashPasswordSHA256(TEMP_PASSWORD);
+        console.log('[AUTH] ===========================================');
+        console.log('[AUTH] Dados do usuário retornados do banco:');
+        console.log('[AUTH]   ID:', user.id_usuario);
+        console.log('[AUTH]   Login:', user.str_login);
+        console.log('[AUTH]   Nome:', user.str_descricao);
+        console.log('[AUTH]   str_senha existe?', !!user.str_senha);
+        console.log('[AUTH]   str_senha (primeiros 16 chars):', user.str_senha ? user.str_senha.substring(0, 16) + '...' : 'NULL');
+        console.log('[AUTH]   Hash TEMP_PASSWORD (primeiros 16 chars):', tempPasswordHash.substring(0, 16) + '...');
+        console.log('[AUTH]   Hashs são iguais?', user.str_senha === tempPasswordHash);
+        console.log('[AUTH]   É senha temporária?', needsPasswordChange);
+        console.log('[AUTH]   Precisa trocar senha?', needsPasswordChange);
+        console.log('[AUTH] ===========================================');
 
         // Buscar perfis do usuário (tb_usuario_perfil não tem str_ativo, verificar apenas no perfil)
         const profilesResult = await db.query(
@@ -249,13 +339,146 @@ app.get('/api/auth/user/:id', async (req, res) => {
             str_descricao: p.str_descricao
         }));
 
-        res.json({
-            ...user,
-            profiles: profiles
-        });
+        // Não retornar str_senha por segurança, mas incluir flag de trocar senha
+        const { str_senha, ...userWithoutPassword } = user;
+        
+        const responseData = {
+            ...userWithoutPassword,
+            profiles: profiles,
+            trocar_senha: needsPasswordChange
+        };
+        
+        console.log('[AUTH] Resposta final do endpoint /api/auth/user/:id:');
+        console.log('[AUTH]   ID:', responseData.id_usuario);
+        console.log('[AUTH]   Login:', responseData.str_login);
+        console.log('[AUTH]   trocar_senha:', responseData.trocar_senha);
+
+        res.json(responseData);
     } catch (error) {
         console.error('Erro ao buscar usuário:', error);
         res.status(500).json({ error: 'Erro interno do servidor' });
+    }
+});
+
+// POST /api/auth/change-password - Usuário trocar sua própria senha
+app.post('/api/auth/change-password', async (req, res) => {
+    try {
+        const userId = req.currentUserId;
+        const { currentPassword, newPassword } = req.body;
+
+        console.log('[CHANGE_PASSWORD] ===========================================');
+        console.log('[CHANGE_PASSWORD] Requisição recebida');
+        console.log('[CHANGE_PASSWORD] User ID:', userId);
+        console.log('[CHANGE_PASSWORD] Tem currentPassword?', !!currentPassword);
+        console.log('[CHANGE_PASSWORD] Tem newPassword?', !!newPassword);
+
+        if (!newPassword || newPassword.trim().length < 6) {
+            console.log('[CHANGE_PASSWORD] ❌ Validação falhou: senha muito curta');
+            return res.status(400).json({ 
+                error: 'A nova senha deve ter pelo menos 6 caracteres' 
+            });
+        }
+
+        // Buscar usuário e senha atual
+        const userResult = await db.query(
+            `SELECT id_usuario, str_senha FROM tb_usuario 
+             WHERE id_usuario = $1 AND str_ativo = 'A' AND bloqueado = false`,
+            [userId]
+        );
+
+        if (userResult.rows.length === 0) {
+            console.log('[CHANGE_PASSWORD] ❌ Usuário não encontrado');
+            return res.status(404).json({ error: 'Usuário não encontrado' });
+        }
+
+        const user = userResult.rows[0];
+        const isCurrentPasswordTemp = isTempPassword(user.str_senha);
+        
+        console.log('[CHANGE_PASSWORD] Usuário encontrado');
+        console.log('[CHANGE_PASSWORD] Senha atual é temporária?', isCurrentPasswordTemp);
+
+        // Se a senha atual é temporária (reset), não precisa verificar currentPassword
+        // Se não for temporária e currentPassword foi fornecido, verificar
+        if (!isCurrentPasswordTemp && currentPassword && user.str_senha) {
+            const currentPasswordHash = hashPasswordSHA256(currentPassword);
+            if (currentPasswordHash !== user.str_senha) {
+                console.log('[CHANGE_PASSWORD] ❌ Senha atual incorreta');
+                return res.status(401).json({ error: 'Senha atual incorreta' });
+            }
+        }
+
+        // Hash da nova senha
+        const newPasswordHash = hashPasswordSHA256(newPassword);
+        console.log('[CHANGE_PASSWORD] Hash da nova senha gerado');
+
+        // Atualizar senha (substitui a senha temporária)
+        console.log('[CHANGE_PASSWORD] Atualizando senha no banco...');
+        await db.query(
+            `UPDATE tb_usuario 
+             SET str_senha = $1, dh_edita = NOW() 
+             WHERE id_usuario = $2`,
+            [newPasswordHash, userId]
+        );
+        console.log('[CHANGE_PASSWORD] ✅ Senha atualizada no banco');
+
+        // Registrar auditoria (pode falhar, mas não deve bloquear)
+        try {
+            const auditDbId = await createAuditLog('CHANGE_PASSWORD', userId, {
+                performedBy: userId,
+                self_change: true
+            });
+            const auditLabel = formatAuditId(auditDbId);
+            console.log('[CHANGE_PASSWORD] ✅ Auditoria registrada:', auditLabel);
+
+            res.json({
+                success: true,
+                message: 'Senha alterada com sucesso!',
+                auditId: auditLabel
+            });
+        } catch (auditError) {
+            console.warn('[CHANGE_PASSWORD] ⚠️ Erro ao registrar auditoria (não crítico):', auditError.message);
+            // Retornar sucesso mesmo se auditoria falhar
+            res.json({
+                success: true,
+                message: 'Senha alterada com sucesso!',
+                auditId: 'N/A'
+            });
+        }
+        
+        console.log('[CHANGE_PASSWORD] ===========================================');
+    } catch (error) {
+        console.error('[CHANGE_PASSWORD] ❌ Erro ao trocar senha:', error);
+        console.error('[CHANGE_PASSWORD] Stack:', error.stack);
+        res.status(500).json({ error: 'Erro interno do servidor: ' + error.message });
+    }
+});
+
+// GET /api/auth/check-password-reset/:id - Verificar se usuário precisa trocar senha (endpoint de teste)
+app.get('/api/auth/check-password-reset/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        // Buscar senha do usuário
+        const result = await db.query(
+            `SELECT str_senha FROM tb_usuario WHERE id_usuario = $1`,
+            [id]
+        );
+        
+        let needsPasswordChange = false;
+        if (result.rows.length > 0 && result.rows[0].str_senha) {
+            needsPasswordChange = isTempPassword(result.rows[0].str_senha);
+        }
+        
+        res.json({
+            needsPasswordChange,
+            userId: id,
+            message: needsPasswordChange 
+                ? 'Usuário precisa trocar a senha (senha temporária detectada)' 
+                : 'Usuário não precisa trocar a senha'
+        });
+    } catch (error) {
+        console.error('Erro ao verificar reset de senha:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -718,18 +941,82 @@ app.post('/api/chat', async (req, res) => {
             return res.status(400).json({ error: 'Message is required' });
         }
 
-        // Process message with OpenAI
-        const aiResponse = await processMessage(message);
+        // Obter userId do header ou do middleware
+        const userId = req.currentUserId;
+        console.log('[CHAT API] 📨 Recebida mensagem:', message.substring(0, 50), 'User ID:', userId);
+
+        // Obter histórico do Redis/Banco (ou memória como fallback)
+        let conversationHistory = await getConversationHistory(userId);
+        console.log('[CHAT API] 📚 Histórico obtido:', conversationHistory.length, 'mensagens');
+        if (conversationHistory.length > 0) {
+            console.log('[CHAT API] 📝 Últimas mensagens do histórico:', conversationHistory.slice(-4).map(m => `${m.role}: ${m.content?.substring(0, 50)}...`));
+        } else {
+            console.log('[CHAT API] ⚠️ NENHUM histórico encontrado para user', userId);
+        }
+
+        // Process message with OpenAI (usando histórico do Redis)
+        const aiResponse = await processMessage(message, conversationHistory);
+        
+        // Função auxiliar para construir histórico atualizado com a resposta e salvar no Redis
+        const buildUpdatedHistory = async (assistantMessage) => {
+            // Usar histórico do aiResponse se disponível (já contém mensagem do usuário)
+            // Caso contrário, usar conversationHistory e adicionar mensagem do usuário
+            let updatedHistory;
+            if (aiResponse.history && Array.isArray(aiResponse.history) && aiResponse.history.length > 0) {
+                updatedHistory = [...aiResponse.history];
+                console.log('[CHAT API] buildUpdatedHistory: ✅ Usando histórico do aiResponse, tamanho:', updatedHistory.length);
+            } else {
+                updatedHistory = [...conversationHistory];
+                // Adicionar mensagem do usuário se ainda não estiver no histórico
+                const lastMessage = updatedHistory[updatedHistory.length - 1];
+                if (!lastMessage || lastMessage.role !== 'user' || lastMessage.content !== message) {
+                    updatedHistory.push({
+                        role: 'user',
+                        content: message
+                    });
+                }
+                console.log('[CHAT API] buildUpdatedHistory: ⚠️ Usando conversationHistory, tamanho após adicionar user:', updatedHistory.length);
+            }
+            // Adicionar resposta da IA ao histórico (evitar duplicatas)
+            if (assistantMessage) {
+                const lastMessage = updatedHistory[updatedHistory.length - 1];
+                if (!lastMessage || lastMessage.role !== 'assistant' || lastMessage.content !== assistantMessage) {
+                    updatedHistory.push({
+                        role: 'assistant',
+                        content: assistantMessage
+                    });
+                    console.log('[CHAT API] buildUpdatedHistory: ✅ Adicionada resposta assistant, tamanho final:', updatedHistory.length);
+                } else {
+                    console.log('[CHAT API] buildUpdatedHistory: ⚠️ Resposta assistant já existe no histórico, ignorando duplicata');
+                }
+            }
+            // Salvar histórico atualizado no Redis e banco
+            await saveConversationHistory(userId, updatedHistory);
+            console.log('[CHAT API] buildUpdatedHistory: 💾 Histórico salvo no Redis/DB para user', userId);
+            return updatedHistory;
+        };
 
         if (aiResponse.type === 'ERROR') {
-            return res.status(500).json({ type: 'ERROR', message: aiResponse.message });
+            const errorHistory = await buildUpdatedHistory(aiResponse.message || 'Erro ao processar mensagem');
+            return res.status(500).json({ 
+                type: 'ERROR', 
+                message: aiResponse.message,
+                history: errorHistory
+            });
         }
 
         if (aiResponse.type === 'MESSAGE') {
-            return res.json({ type: 'TEXT', content: aiResponse.content });
+            const messageHistory = await buildUpdatedHistory(aiResponse.content);
+            return res.json({ 
+                type: 'TEXT', 
+                content: aiResponse.content,
+                history: messageHistory
+            });
         }
 
         if (aiResponse.type === 'TOOL_CALL') {
+            console.log('[CHAT API] Tool call detectado:', aiResponse.toolCalls[0].function.name);
+            console.log('[CHAT API] Histórico do aiResponse:', aiResponse.history?.length || 0, 'mensagens');
             const toolCall = aiResponse.toolCalls[0];
             let fnName = toolCall.function.name;
             let args;
@@ -756,6 +1043,18 @@ app.post('/api/chat', async (req, res) => {
                                        (lowerMessage.includes('email') || lowerMessage.includes('nome') || 
                                         lowerMessage.includes('cpf') || lowerMessage.includes('senha') ||
                                         lowerMessage.includes('perfil'));
+                // Detectar reset de senha: quando admin pede para resetar/trocar senha de OUTRO usuário
+                const isPasswordResetRequest = (
+                    (lowerMessage.includes('resetar') && lowerMessage.includes('senha')) ||
+                    (lowerMessage.includes('reset') && lowerMessage.includes('senha')) ||
+                    (lowerMessage.includes('trocar senha') && !lowerMessage.includes('minha') && !lowerMessage.includes('própria')) ||
+                    (lowerMessage.includes('troque senha') && !lowerMessage.includes('minha') && !lowerMessage.includes('própria'))
+                ) && (
+                    lowerMessage.includes('usuário') || 
+                    lowerMessage.includes('do') || 
+                    lowerMessage.includes('de') ||
+                    login || email || cpf // Se tem identificador de outro usuário
+                );
                 
                 if (fnName === 'queryUsers' && (isBlockRequest || isUnblockRequest)) {
                     console.log('[CHAT] Interceptando queryUsers - mensagem pede para bloquear/desbloquear usuário específico');
@@ -822,66 +1121,116 @@ app.post('/api/chat', async (req, res) => {
                     }
                     
                     // Extrair novos valores da mensagem
+                    // IMPORTANTE: Só extrair se o valor foi explicitamente fornecido na mensagem
                     let newEmail = null;
                     let newName = null;
                     let newCpf = null;
                     let newPassword = null;
                     let newProfile = null;
                     
-                    // Extrair novo email
+                    // Extrair novo email - SÓ se houver um email explícito na mensagem
                     if (lowerMessage.includes('email')) {
                         const newEmailMatch = message.match(/(?:para|@|email)\s+([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
                         if (newEmailMatch) {
                             newEmail = newEmailMatch[1];
                         } else {
-                            // Tentar pegar o último email mencionado
+                            // Tentar pegar o último email mencionado APENAS se houver múltiplos emails
                             const emails = message.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/g);
                             if (emails && emails.length >= 2) {
                                 newEmail = emails[emails.length - 1]; // Último email é o novo
                             }
+                            // Se não encontrou email explícito, NÃO definir newEmail (deixar null)
+                            // A validação em findUserAndUpdate vai solicitar o email
                         }
                     }
                     
-                    // Extrair novo nome
+                    // Extrair novo nome - SÓ se houver um nome explícito na mensagem
                     if (lowerMessage.includes('nome')) {
                         const newNameMatch = message.match(/(?:para|nome)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/);
                         if (newNameMatch) {
                             newName = newNameMatch[1];
                         }
+                        // Se não encontrou nome explícito, NÃO definir newName (deixar null)
                     }
                     
-                    // Extrair novo CPF
+                    // Extrair novo CPF - SÓ se houver um CPF explícito na mensagem
                     if (lowerMessage.includes('cpf')) {
                         const newCpfMatch = message.match(/(?:para|cpf)\s+(\d{3}\.\d{3}\.\d{3}-\d{2})/);
                         if (newCpfMatch) {
                             newCpf = newCpfMatch[1];
                         }
+                        // Se não encontrou CPF explícito, NÃO definir newCpf (deixar null)
                     }
                     
-                    // Extrair novo perfil
+                    // Extrair novo perfil - SÓ se houver um perfil explícito na mensagem
                     if (lowerMessage.includes('perfil')) {
                         if (lowerMessage.includes('master')) {
                             newProfile = 'MASTER';
                         } else if (lowerMessage.includes('operacional')) {
                             newProfile = 'OPERACIONAL';
                         }
+                        // Se não encontrou perfil explícito, NÃO definir newProfile (deixar null)
                     }
                     
-                    if (login || email || cpf) {
-                        console.log('[CHAT] Redirecionando para findUserAndUpdate com:', { login, email, cpf, newEmail, newName, newCpf, newPassword, newProfile });
-                        fnName = 'findUserAndUpdate';
-                        args = {
-                            login: login,
-                            email: email,
-                            cpf: cpf,
-                            newEmail: newEmail,
-                            newName: newName,
-                            newCpf: newCpf,
-                            newPassword: newPassword,
-                            newProfile: newProfile
-                        };
-                    } else {
-                        console.warn('[CHAT] Não foi possível extrair login/email/cpf da mensagem para atualizar');
+                    // VALIDAÇÃO: Se o usuário pediu para atualizar algo mas não forneceu o novo valor,
+                    // não redirecionar para findUserAndUpdate - deixar a IA processar e solicitar o dado
+                    const requestedUpdate = lowerMessage.includes('atualizar') || lowerMessage.includes('atualize') || 
+                                           lowerMessage.includes('alterar') || lowerMessage.includes('altere') ||
+                                           lowerMessage.includes('trocar') || lowerMessage.includes('troque') ||
+                                           lowerMessage.includes('mudar') || lowerMessage.includes('mude');
+                    
+                    // Detectar se é reset de senha (admin resetando senha de outro usuário)
+                    const passwordRequested = lowerMessage.includes('senha');
+                    const isPasswordReset = isPasswordResetRequest && passwordRequested;
+                    
+                    if (requestedUpdate) {
+                        // Verificar se o campo foi solicitado mas o novo valor não foi fornecido
+                        const emailRequested = lowerMessage.includes('email');
+                        const nameRequested = lowerMessage.includes('nome');
+                        const cpfRequested = lowerMessage.includes('cpf');
+                        const profileRequested = lowerMessage.includes('perfil');
+                        
+                        // Se for reset de senha, não precisa fornecer nova senha (será gerada)
+                        if (isPasswordReset) {
+                            // Reset de senha - gerar senha aleatória automaticamente
+                            if (login || email || cpf) {
+                                console.log('[CHAT] Reset de senha detectado - redirecionando para findUserAndUpdate com isPasswordReset=true');
+                                fnName = 'findUserAndUpdate';
+                                args = {
+                                    login: login,
+                                    email: email,
+                                    cpf: cpf,
+                                    isPasswordReset: true
+                                };
+                            }
+                        } else if ((emailRequested && !newEmail) || 
+                            (nameRequested && !newName) || 
+                            (cpfRequested && !newCpf) || 
+                            (profileRequested && !newProfile) ||
+                            (passwordRequested && !newPassword && !isPasswordReset)) {
+                            // Não redirecionar - deixar a IA processar e solicitar o dado faltante
+                            console.log('[CHAT] Usuário pediu atualização mas não forneceu novo valor - deixando IA processar');
+                        } else if (login || email || cpf) {
+                            // Só redirecionar se tiver identificador do usuário E novo valor fornecido
+                            console.log('[CHAT] Redirecionando para findUserAndUpdate com:', { login, email, cpf, newEmail, newName, newCpf, newPassword, newProfile });
+                            fnName = 'findUserAndUpdate';
+                            args = {
+                                login: login,
+                                email: email,
+                                cpf: cpf,
+                                newEmail: newEmail,
+                                newName: newName,
+                                newCpf: newCpf,
+                                newPassword: newPassword,
+                                newProfile: newProfile,
+                                isPasswordReset: false
+                            };
+                        } else {
+                            console.warn('[CHAT] Não foi possível extrair login/email/cpf da mensagem para atualizar');
+                        }
+                    } else if (login || email || cpf) {
+                        // Se não foi pedido update mas tem identificador, pode ser apenas consulta
+                        console.log('[CHAT] Não foi pedido update explícito, mantendo queryUsers');
                     }
                 }
             } catch (interceptError) {
@@ -963,6 +1312,38 @@ app.post('/api/chat', async (req, res) => {
                 if (!email || !email.trim()) missingFields.push('email');
                 if (!profile || !profile.trim()) missingFields.push('perfil');
                 if (!company || !company.trim()) missingFields.push('empresa');
+
+                // VALIDAÇÃO CRÍTICA: Verificar se email não foi gerado automaticamente
+                if (email && email.trim()) {
+                    const emailStr = String(email).trim();
+                    // Rejeitar emails genéricos ou suspeitos que podem ter sido gerados automaticamente
+                    const suspiciousEmailPatterns = [
+                        /example\.com/i,
+                        /test\.com/i,
+                        /placeholder/i,
+                        /temp/i,
+                        /fake/i,
+                        /generated/i,
+                        /@empresa\.com/i, // Email genérico muito comum
+                        /@company\.com/i
+                    ];
+                    
+                    if (suspiciousEmailPatterns.some(pattern => pattern.test(emailStr))) {
+                        return res.status(400).json({
+                            type: 'ERROR',
+                            message: `O email fornecido parece ser genérico ou gerado automaticamente. Por favor, forneça um email válido e específico do usuário. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@empresa.com.br, perfil OPERACIONAL, empresa DANIEL CRED`
+                        });
+                    }
+                    
+                    // Validar formato de email básico
+                    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                    if (!emailRegex.test(emailStr)) {
+                        return res.status(400).json({
+                            type: 'ERROR',
+                            message: `O email fornecido não está em um formato válido. Por favor, forneça um email válido. Ex: Criar usuário: João Silva, CPF 123.456.789-00, login joao.silva, email joao@empresa.com.br, perfil OPERACIONAL, empresa DANIEL CRED`
+                        });
+                    }
+                }
 
                 // Outros campos obrigatórios faltando
                 if (missingFields.length > 0) {
@@ -1049,11 +1430,13 @@ app.post('/api/chat', async (req, res) => {
                     });
                     const auditLabel = formatAuditId(auditDbId);
 
+                    const successMessage = `Usuário cadastrado com sucesso! Login: ${result.rows[0].login}. Audit ID: ${auditLabel}`;
                     return res.json({
                         type: 'ACTION_COMPLETE',
-                        message: `Usuário cadastrado com sucesso! Login: ${result.rows[0].login}. Audit ID: ${auditLabel}`,
+                        message: successMessage,
                         auditId: auditLabel,
-                        data: result.rows[0]
+                        data: result.rows[0],
+                        history: await buildUpdatedHistory(successMessage)
                     });
                 } catch (err) {
                     if (err.code === '23505') { // Duplicate key error
@@ -1229,9 +1612,11 @@ app.post('/api/chat', async (req, res) => {
                         count_only: true
                     });
                     const auditLabel = formatAuditId(auditDbId);
+                    const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                     return res.json({
                         type: 'TEXT',
-                        content: `${message}\nAudit ID: ${auditLabel}`
+                        content: textResponse,
+                        history: await buildUpdatedHistory(textResponse)
                     });
                 } else {
                     const query = `SELECT DISTINCT
@@ -1265,9 +1650,11 @@ app.post('/api/chat', async (req, res) => {
                         if (filters.operation) {
                             message = `Nenhum usuário encontrado para a operação "${filters.operation}".`;
                         }
+                        const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                         return res.json({
                             type: 'TEXT',
-                            content: `${message}\nAudit ID: ${auditLabel}`
+                            content: textResponse,
+                            history: await buildUpdatedHistory(textResponse)
                         });
                     }
 
@@ -1294,9 +1681,11 @@ app.post('/api/chat', async (req, res) => {
                         }
                         response += '------------------------------------------';
 
+                        const textResponse = `${response}\nAudit ID: ${auditLabel}`;
                         return res.json({
                             type: 'TEXT',
-                            content: `${response}\nAudit ID: ${auditLabel}`
+                            content: textResponse,
+                            history: await buildUpdatedHistory(textResponse)
                         });
                     }
 
@@ -1323,9 +1712,11 @@ app.post('/api/chat', async (req, res) => {
                     if (filters.operation) {
                         message = `Encontrados ${result.rows.length} usuário(s) da operação "${filters.operation}":\n${userList}`;
                     }
+                    const textResponse = `${message}\nAudit ID: ${auditLabel}`;
                     return res.json({
                         type: 'TEXT',
-                        content: `${message}\nAudit ID: ${auditLabel}`
+                        content: textResponse,
+                        history: await buildUpdatedHistory(textResponse)
                     });
                 }
             }
@@ -1334,33 +1725,121 @@ app.post('/api/chat', async (req, res) => {
             if (fnName === 'findUserAndUpdate') {
                 try {
                     console.log('--- findUserAndUpdate ---');
-                    const { login, email, cpf, newName, newEmail, newPassword, newCpf, newProfile } = args;
+                    const { login, email, cpf, newName, newEmail, newPassword, newCpf, newProfile, isPasswordReset } = args;
                     console.log('Args:', args);
+                    
+                    // Se for reset de senha (admin resetando senha de outro usuário), gerar senha aleatória genérica
+                    let finalPassword = newPassword;
+                    let shouldMarkPasswordChange = false;
+                    let generatedPassword = null;
+                    if (isPasswordReset) {
+                        // Gerar senha aleatória genérica para reset (será mostrada na resposta)
+                        generatedPassword = generateRandomPassword(12);
+                        // Mas armazenar a senha temporária fixa para detectar que precisa trocar
+                        finalPassword = TEMP_PASSWORD;
+                        shouldMarkPasswordChange = true;
+                        console.log('[PASSWORD_RESET] ✅ Reset de senha ativado!');
+                        console.log('[PASSWORD_RESET] Senha genérica gerada (para mostrar):', generatedPassword);
+                        console.log('[PASSWORD_RESET] Senha temporária armazenada (para detectar troca):', TEMP_PASSWORD);
+                        console.log('[PASSWORD_RESET] Flag shouldMarkPasswordChange:', shouldMarkPasswordChange);
+                    }
 
+                    // VALIDAÇÃO CRÍTICA: Campos imutáveis NÃO podem ser alterados
+                    // Login e CPF são imutáveis após criação - BLOQUEAR qualquer tentativa de alteração
+                    if (args.newLogin) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: 'O login não pode ser alterado após a criação do usuário. O login é um campo imutável.'
+                        });
+                    }
+
+                    // VALIDAÇÃO CRÍTICA: Verificar se os novos valores são válidos e não foram gerados automaticamente
+                    // Rejeitar valores que parecem ser gerados automaticamente ou inferidos
+                    const isValidValue = (value) => {
+                        if (!value || value === null || value === undefined) return false;
+                        const strValue = String(value).trim();
+                        if (strValue === '' || strValue === 'undefined' || strValue === 'null') return false;
+                        // Rejeitar emails genéricos ou suspeitos
+                        if (strValue.includes('@')) {
+                            const suspiciousPatterns = [
+                                /example\.com/i,
+                                /test\.com/i,
+                                /placeholder/i,
+                                /temp/i,
+                                /fake/i,
+                                /generated/i
+                            ];
+                            if (suspiciousPatterns.some(pattern => pattern.test(strValue))) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    };
+
+                    // Validar que se o usuário pediu para atualizar um campo, o novo valor DEVE ser fornecido
+                    // Não podemos inferir ou gerar valores automaticamente
                     let setClauses = [];
                     let whereClauses = [];
                     const params = [];
                     let paramCount = 1;
+                    const missingFields = [];
 
                     if (newName) {
-                        setClauses.push(`str_descricao = $${paramCount}`);
-                        params.push(newName);
-                        paramCount++;
+                        if (!isValidValue(newName)) {
+                            missingFields.push('novo nome');
+                        } else {
+                            setClauses.push(`str_descricao = $${paramCount}`);
+                            params.push(newName);
+                            paramCount++;
+                        }
                     }
                     if (newEmail) {
-                        setClauses.push(`email = $${paramCount}`);
-                        params.push(newEmail);
-                        paramCount++;
+                        if (!isValidValue(newEmail)) {
+                            missingFields.push('novo email');
+                        } else {
+                            // Validar formato de email básico
+                            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                            if (!emailRegex.test(String(newEmail).trim())) {
+                                return res.json({
+                                    type: 'ERROR',
+                                    message: 'O email fornecido não está em um formato válido. Por favor, forneça um email válido.'
+                                });
+                            }
+                            setClauses.push(`email = $${paramCount}`);
+                            params.push(String(newEmail).trim());
+                            paramCount++;
+                        }
                     }
-                    if (newPassword) {
-                        setClauses.push(`str_senha = $${paramCount}`);
-                        params.push(newPassword);
-                        paramCount++;
+                    if (finalPassword) {
+                        if (!isValidValue(finalPassword)) {
+                            missingFields.push('nova senha');
+                        } else {
+                            // Hash da senha com SHA-256 antes de armazenar
+                            const hashedPassword = hashPasswordSHA256(finalPassword);
+                            setClauses.push(`str_senha = $${paramCount}`);
+                            params.push(hashedPassword);
+                            paramCount++;
+                            // Se for reset de senha, usar senha temporária fixa (já definida acima)
+                            // Se não for reset, é uma senha normal definida pelo usuário
+                            if (shouldMarkPasswordChange || isPasswordReset) {
+                                console.log('[PASSWORD_RESET] Usando senha temporária para forçar troca no próximo login');
+                            }
+                        }
                     }
                     if (newCpf) {
-                        setClauses.push(`str_cpf = $${paramCount}`);
-                        params.push(newCpf);
-                        paramCount++;
+                        // CPF é IMUTÁVEL após criação - BLOQUEAR qualquer tentativa de alteração
+                        return res.json({
+                            type: 'ERROR',
+                            message: 'O CPF não pode ser alterado após a criação do usuário. O CPF é um campo imutável.'
+                        });
+                    }
+
+                    // Se algum campo foi solicitado mas não foi fornecido corretamente, retornar erro
+                    if (missingFields.length > 0) {
+                        return res.json({
+                            type: 'ERROR',
+                            message: `Para fazer a alteração, é necessário fornecer explicitamente: ${missingFields.join(', ')}. Por favor, informe os dados corretos antes de atualizar.`
+                        });
                     }
 
                     // Se for mudar perfil, tratar separadamente (requer confirmação se for para MASTER)
@@ -1503,21 +1982,58 @@ app.post('/api/chat', async (req, res) => {
 
                     setClauses.push(`dh_edita = NOW()`);
 
-                    const query = `UPDATE tb_usuario 
+                    let query = `UPDATE tb_usuario 
                         SET ${setClauses.join(', ')} 
                         WHERE ${whereClauses.join(' AND ')}
                         RETURNING id_usuario as id, str_descricao as name, str_login as login, email`;
 
-                    console.log('Query:', query);
-                    console.log('Params:', params);
+                    console.log('[UPDATE] Query completa:', query);
+                    console.log('[UPDATE] Params:', params);
+                    console.log('[UPDATE] SetClauses:', setClauses);
 
-                    const result = await db.query(query, params);
+                    let result;
+                    try {
+                        result = await db.query(query, params);
+                        console.log('[UPDATE] Resultado do UPDATE:', result.rows[0]);
+                    } catch (dbError) {
+                        throw dbError;
+                    }
 
                     if (result.rowCount === 0) {
                         return res.json({
                             type: 'ERROR',
                             message: `Usuário não encontrado com os critérios fornecidos.`
                         });
+                    }
+
+                    // Verificar se a senha foi atualizada corretamente (usando str_senha)
+                    if (shouldMarkPasswordChange || isPasswordReset) {
+                        try {
+                            const verifyResult = await db.query(
+                                `SELECT str_senha FROM tb_usuario WHERE id_usuario = $1`,
+                                [result.rows[0].id]
+                            );
+                            if (verifyResult.rows.length > 0) {
+                                const currentPasswordHash = verifyResult.rows[0].str_senha;
+                                const expectedHash = hashPasswordSHA256(finalPassword); // finalPassword = TEMP_PASSWORD
+                                const tempPasswordHash = hashPasswordSHA256(TEMP_PASSWORD);
+                                const isCorrect = currentPasswordHash === expectedHash;
+                                const isTemp = currentPasswordHash === tempPasswordHash;
+                                console.log('[PASSWORD_RESET] Verificação pós-UPDATE:');
+                                console.log('[PASSWORD_RESET]   Hash esperado (TEMP_PASSWORD - primeiros 16 chars):', expectedHash.substring(0, 16) + '...');
+                                console.log('[PASSWORD_RESET]   Hash no banco (primeiros 16 chars):', currentPasswordHash ? currentPasswordHash.substring(0, 16) + '...' : 'NULL');
+                                console.log('[PASSWORD_RESET]   Senha foi atualizada corretamente?', isCorrect);
+                                console.log('[PASSWORD_RESET]   É senha temporária?', isTemp);
+                                if (!isCorrect) {
+                                    console.warn('[PASSWORD_RESET] ⚠️ Senha não foi atualizada corretamente!');
+                                } else {
+                                    console.log('[PASSWORD_RESET] ✅ Senha temporária (TEMP_PASSWORD) armazenada corretamente!');
+                                    console.log('[PASSWORD_RESET] ✅ Modal aparecerá no próximo login do usuário');
+                                }
+                            }
+                        } catch (verifyError) {
+                            console.error('[PASSWORD_RESET] Erro ao verificar senha:', verifyError.message);
+                        }
                     }
 
                     // Se também mudou o perfil (mas não foi para MASTER), registrar no audit
@@ -1538,18 +2054,31 @@ app.post('/api/chat', async (req, res) => {
                         updates: {
                             ...(newName ? { newName } : {}),
                             ...(newEmail ? { newEmail } : {}),
-                            ...(newPassword ? { newPassword: '***' } : {}),
+                            ...(finalPassword ? { passwordChanged: true, isReset: shouldMarkPasswordChange || isPasswordReset } : {}),
                             ...(newCpf ? { newCpf } : {}),
                             ...profileChangeInfo
                         }
                     });
                     const auditLabel = formatAuditId(auditDbId);
 
+                    let message = `Usuário ${result.rows[0].name} atualizado com sucesso!`;
+                    if (shouldMarkPasswordChange || isPasswordReset) {
+                        // Se foi reset de senha, mostrar a senha gerada (não a temporária armazenada)
+                        const passwordToShow = generatedPassword || finalPassword;
+                        message += `\n\n🔑 Senha resetada com sucesso!\n📝 Senha temporária gerada: **${passwordToShow}**\n⚠️ O usuário precisará criar uma nova senha no próximo login.`;
+                    }
+                    message += `\nAudit ID: ${auditLabel}`;
+
                     return res.json({
                         type: 'ACTION_COMPLETE',
-                        message: `Usuário ${result.rows[0].name} atualizado com sucesso! Audit ID: ${auditLabel}`,
+                        message: message,
                         auditId: auditLabel,
-                        data: result.rows[0]
+                        data: {
+                            ...result.rows[0],
+                            ...(shouldMarkPasswordChange || isPasswordReset ? { 
+                                temporaryPassword: generatedPassword || finalPassword
+                            } : {})
+                        }
                     });
                 } catch (dbError) {
                     console.error('Database Error in findUserAndUpdate:', dbError);
@@ -2951,19 +3480,56 @@ app.post('/api/action/confirm', async (req, res) => {
         }
 
         if (pendingAction.action === 'resetPasswords') {
-            const result = await db.query(
-                'SELECT * FROM users WHERE company ILIKE $1',
-                [`%${pendingAction.company}%`]
+            // Buscar a operação pelo nome (empresas são operações no sistema)
+            const operationLookup = await db.query(
+                `SELECT id_operacao, str_descricao FROM tb_operacao 
+                 WHERE UPPER(str_descricao) LIKE UPPER($1) AND str_ativo = 'A'
+                 ORDER BY 
+                    CASE 
+                        WHEN UPPER(str_descricao) = UPPER($2) THEN 1
+                        WHEN UPPER(str_descricao) LIKE UPPER($2) || '%' THEN 2
+                        ELSE 3
+                    END
+                 LIMIT 1`,
+                [`%${pendingAction.company}%`, pendingAction.company]
             );
 
-            const auditDbId = await createAuditLog('RESET_PASSWORDS', null, { company: pendingAction.company, count: result.rowCount, performedBy });
+            if (operationLookup.rowCount === 0) {
+                deletePendingAction(confirmationToken);
+                return res.json({
+                    type: 'ERROR',
+                    message: `Empresa/Operação "${pendingAction.company}" não encontrada.`
+                });
+            }
+
+            const operation = operationLookup.rows[0];
+            
+            // Senha padrão para reset (pode ser configurada via variável de ambiente)
+            const defaultPassword = process.env.DEFAULT_RESET_PASSWORD || '123456';
+            const hashedPassword = hashPasswordSHA256(defaultPassword);
+
+            // Atualizar senhas de todos os usuários da operação
+            const result = await db.query(
+                `UPDATE tb_usuario 
+                 SET str_senha = $1, dh_edita = NOW() 
+                 WHERE id_operacao = $2 AND str_ativo = 'A'
+                 RETURNING id_usuario`,
+                [hashedPassword, operation.id_operacao]
+            );
+
+            const auditDbId = await createAuditLog('RESET_PASSWORDS', null, { 
+                company: pendingAction.company, 
+                operation_id: operation.id_operacao,
+                count: result.rowCount, 
+                performedBy 
+            });
             const auditLabel = formatAuditId(auditDbId);
 
             deletePendingAction(confirmationToken);
 
             return res.json({
                 type: 'ACTION_COMPLETE',
-                message: `Senhas resetadas para ${result.rowCount} usuários. Audit ID: ${auditLabel}`,
+                message: `Senhas resetadas para ${result.rowCount} usuários da empresa "${operation.str_descricao}". Senha padrão: ${defaultPassword}. Audit ID: ${auditLabel}`,
                 auditId: auditLabel,
                 count: result.rowCount
             });
@@ -3641,6 +4207,109 @@ app.get('/api/reports/generate', async (req, res) => {
     } catch (error) {
         console.error('Erro ao gerar relatório:', error);
         res.status(500).json({ error: 'Erro ao gerar relatório', message: error.message });
+    }
+});
+
+// GET /api/conversations/history - Obter histórico completo de conversas do usuário
+app.get('/api/conversations/history', async (req, res) => {
+    try {
+        const userId = req.currentUserId;
+        const limit = parseInt(req.query.limit) || 50;
+        const startDate = req.query.startDate ? new Date(req.query.startDate) : null;
+        const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+
+        // Buscar histórico do Redis primeiro (mais rápido)
+        let history = await getConversationHistory(userId, limit);
+        
+        // Se não encontrou no Redis, buscar do banco
+        if (history.length === 0) {
+            history = await getFullConversationHistory(userId, limit, startDate, endDate);
+        }
+
+        // Converter para formato do frontend (com id e type)
+        const formattedHistory = history.map((msg, index) => ({
+            id: index + 1,
+            type: msg.role === 'user' ? 'user' : 'bot',
+            text: msg.content,
+            role: msg.role,
+            content: msg.content
+        }));
+
+        res.json({
+            success: true,
+            userId,
+            count: formattedHistory.length,
+            messages: formattedHistory,
+            history: history // Manter formato original também
+        });
+    } catch (error) {
+        console.error('Erro ao buscar histórico de conversas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao buscar histórico', 
+            message: error.message 
+        });
+    }
+});
+
+// DELETE /api/conversations/history - Limpar histórico de conversas do usuário
+app.delete('/api/conversations/history', async (req, res) => {
+    try {
+        const userId = req.currentUserId;
+        const { clearConversationHistory } = require('./middleware/conversationHistoryStore');
+        
+        await clearConversationHistory(userId);
+
+        res.json({
+            success: true,
+            message: 'Histórico de conversas limpo com sucesso'
+        });
+    } catch (error) {
+        console.error('Erro ao limpar histórico de conversas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao limpar histórico', 
+            message: error.message 
+        });
+    }
+});
+
+// GET /api/conversations/stats - Obter estatísticas do histórico
+app.get('/api/conversations/stats', async (req, res) => {
+    try {
+        const userId = req.query.userId ? parseInt(req.query.userId) : null;
+        const stats = await getHistoryStats(userId);
+        
+        res.json({
+            success: true,
+            stats,
+            config: {
+                redisTTL: REDIS_TTL_SECONDS,
+                dbRetentionDays: DB_RETENTION_DAYS || 'Permanente'
+            }
+        });
+    } catch (error) {
+        console.error('Erro ao obter estatísticas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao obter estatísticas', 
+            message: error.message 
+        });
+    }
+});
+
+// POST /api/conversations/cleanup - Limpar mensagens antigas (requer permissão de admin)
+app.post('/api/conversations/cleanup', async (req, res) => {
+    try {
+        const result = await cleanupOldMessages();
+        res.json({
+            success: true,
+            message: `Limpeza concluída: ${result.deleted} mensagens removidas`,
+            deleted: result.deleted
+        });
+    } catch (error) {
+        console.error('Erro ao limpar mensagens antigas:', error);
+        res.status(500).json({ 
+            error: 'Erro ao limpar mensagens antigas', 
+            message: error.message 
+        });
     }
 });
 
