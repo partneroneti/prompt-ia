@@ -14,6 +14,8 @@ const PromptManager = () => {
     ]);
     const [inputValue, setInputValue] = useState('');
     const [previewData, setPreviewData] = useState(null);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+    const [conversationHistory, setConversationHistory] = useState([]);
     const navigate = useNavigate();
     const messagesEndRef = useRef(null);
 
@@ -24,6 +26,77 @@ const PromptManager = () => {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    // Carregar histórico quando o componente é montado
+    useEffect(() => {
+        const loadConversationHistory = async () => {
+            if (!user || !user.id || isLoadingHistory) return;
+
+            setIsLoadingHistory(true);
+            try {
+                console.log('[PromptManager] Carregando histórico para user:', user.id);
+                const authHeaders = { 'x-user-id': user.id.toString() };
+                const response = await fetch('/api/conversations/history?limit=20', {
+                    headers: authHeaders
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('[PromptManager] Histórico recebido:', data.count, 'mensagens');
+                    
+                    if (data.messages && data.messages.length > 0) {
+                        // Converter histórico do servidor para formato do componente
+                        // Remover duplicatas baseado no conteúdo
+                        const seenMessages = new Set();
+                        const historyMessages = data.messages
+                            .filter((msg) => {
+                                const key = `${msg.role || msg.type}:${msg.content || msg.text}`;
+                                if (seenMessages.has(key)) {
+                                    return false; // Duplicata, ignorar
+                                }
+                                seenMessages.add(key);
+                                return true;
+                            })
+                            .map((msg, index) => ({
+                                id: msg.id || Date.now() + index,
+                                type: msg.type || (msg.role === 'user' ? 'user' : 'bot'),
+                                text: msg.text || msg.content || ''
+                            }));
+
+                        console.log('[PromptManager] Carregando', historyMessages.length, 'mensagens do histórico (duplicatas removidas)');
+                        setMessages(historyMessages);
+
+                        // Atualizar histórico de conversa para contexto da IA
+                        if (data.history && Array.isArray(data.history)) {
+                            // Remover duplicatas do histórico também
+                            const seenHistory = new Set();
+                            const uniqueHistory = data.history.filter((msg) => {
+                                const key = `${msg.role}:${msg.content}`;
+                                if (seenHistory.has(key)) {
+                                    return false;
+                                }
+                                seenHistory.add(key);
+                                return true;
+                            });
+                            console.log('[PromptManager] Atualizando conversationHistory com', uniqueHistory.length, 'mensagens únicas');
+                            setConversationHistory(uniqueHistory);
+                        }
+                    } else {
+                        // Se não há histórico, manter mensagem de boas-vindas
+                        console.log('[PromptManager] Nenhum histórico encontrado, mantendo mensagem de boas-vindas');
+                    }
+                } else {
+                    console.error('[PromptManager] Erro ao buscar histórico:', response.status);
+                }
+            } catch (error) {
+                console.error('[PromptManager] Erro ao carregar histórico:', error);
+            } finally {
+                setIsLoadingHistory(false);
+            }
+        };
+
+        loadConversationHistory();
+    }, [user]);
 
     const handleSend = () => {
         if (!inputValue.trim()) return;
@@ -42,7 +115,17 @@ const PromptManager = () => {
         try {
             // Criar headers de autenticação
             const authHeaders = user && user.id ? { 'x-user-id': user.id.toString() } : {};
-            const response = await processCommandWithAI(text, authHeaders);
+            const response = await processCommandWithAI(text, authHeaders, conversationHistory);
+            
+            // Atualizar histórico de conversa se retornado
+            if (response.history && Array.isArray(response.history)) {
+                setConversationHistory(response.history);
+            }
+
+            // Atualizar histórico de conversa se retornado
+            if (response.history && Array.isArray(response.history)) {
+                setConversationHistory(response.history);
+            }
 
             if (response.type === 'TEXT') {
                 setMessages(prev => [...prev, {
@@ -172,6 +255,11 @@ const PromptManager = () => {
 
             {/* Chat Area */}
             <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/30 min-h-0">
+                {isLoadingHistory && (
+                    <div className="flex justify-center items-center py-4">
+                        <div className="text-sm text-slate-500">Carregando histórico...</div>
+                    </div>
+                )}
                 {messages.map((msg) => (
                     <div
                         key={msg.id}
