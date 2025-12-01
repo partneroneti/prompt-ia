@@ -1,5 +1,85 @@
 # 📚 Configuração de Retenção do Histórico de Conversas
 
+## 🔌 Configuração do Redis
+
+### Redis Local vs Remoto
+
+O sistema suporta tanto Redis local quanto remoto (da empresa/cloud). Configure via variável de ambiente:
+
+#### Redis Local (Desenvolvimento)
+```bash
+# Redis local na porta padrão
+REDIS_URL=redis://localhost:6379
+
+# Redis local em porta customizada
+REDIS_URL=redis://localhost:6380
+```
+
+#### Redis Remoto (Produção/Empresa)
+```bash
+# Redis remoto sem autenticação
+REDIS_URL=redis://redis.empresa.com:6379
+
+# Redis remoto com senha
+REDIS_URL=redis://senha@redis.empresa.com:6379
+
+# Redis remoto com usuário e senha
+REDIS_URL=redis://usuario:senha@redis.empresa.com:6379
+
+# Redis remoto com SSL/TLS (rediss://)
+REDIS_URL=rediss://usuario:senha@redis.empresa.com:6380
+
+# Redis Cloud (ex: Redis Cloud, AWS ElastiCache)
+REDIS_URL=redis://default:senha@redis-12345.c1.us-east-1-1.ec2.cloud.redislabs.com:12345
+```
+
+#### Exemplos de Provedores Cloud
+
+**Redis Cloud:**
+```bash
+REDIS_URL=redis://default:senha@redis-12345.c1.us-east-1-1.ec2.cloud.redislabs.com:12345
+```
+
+**AWS ElastiCache:**
+```bash
+REDIS_URL=redis://master.abc123.0001.use1.cache.amazonaws.com:6379
+```
+
+**Azure Cache for Redis:**
+```bash
+REDIS_URL=rediss://nome-cache.redis.cache.windows.net:6380?ssl=true
+# Com senha: rediss://:senha@nome-cache.redis.cache.windows.net:6380
+```
+
+**Google Cloud Memorystore:**
+```bash
+REDIS_URL=redis://10.0.0.1:6379
+```
+
+### Configuração no .env
+
+Adicione no arquivo `.env` na raiz do projeto:
+
+```bash
+# Redis da empresa (exemplo)
+REDIS_URL=redis://usuario:senha@redis.empresa.com:6379
+
+# Ou Redis local para desenvolvimento
+# REDIS_URL=redis://localhost:6379
+```
+
+**⚠️ Importante:**
+- Não commite o arquivo `.env` com credenciais no Git
+- Use variáveis de ambiente no servidor de produção
+- Para Redis com SSL, use `rediss://` ao invés de `redis://`
+
+### Fallback Automático
+
+Se o Redis não estiver disponível (local ou remoto), o sistema automaticamente:
+1. Tenta conectar ao Redis configurado
+2. Se falhar, usa armazenamento em memória (apenas durante a sessão)
+3. Continua salvando no banco de dados PostgreSQL (permanente)
+
 ## ⏱️ Duração Atual das Mensagens
 
 ### Redis (Cache Rápido)

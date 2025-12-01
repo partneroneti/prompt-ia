@@ -53,7 +53,7 @@ const TOOLS = [
         type: "function",
         function: {
             name: "findUserAndUpdate",
-            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil. IMPORTANTE: Login e CPF são IMUTÁVEIS e NÃO podem ser alterados. Você DEVE sempre solicitar os novos valores antes de chamar esta função.",
+            description: "Encontra um usuário por login, email ou CPF e atualiza suas informações. Use esta função para qualquer pedido de modificação de usuário, incluindo mudança de perfil. IMPORTANTE: Login e CPF são IMUTÁVEIS e NÃO podem ser alterados. Você DEVE sempre solicitar os novos valores antes de chamar esta função. Para resetar senha de outro usuário, use isPasswordReset=true e o sistema gerará uma senha aleatória automaticamente.",
             parameters: {
                 type: "object",
                 properties: {
@@ -62,8 +62,9 @@ const TOOLS = [
                     cpf: { type: "string", description: "CPF do usuário a ser atualizado (usado apenas para identificar o usuário)" },
                     newName: { type: "string", description: "Novo nome completo (OBRIGATÓRIO se o usuário pedir para atualizar o nome)" },
                     newEmail: { type: "string", description: "Novo email (OBRIGATÓRIO se o usuário pedir para atualizar o email)" },
-                    newPassword: { type: "string", description: "Nova senha (OBRIGATÓRIO se o usuário pedir para atualizar a senha)" },
-                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis. OBRIGATÓRIO se o usuário pedir para atualizar o perfil." }
+                    newPassword: { type: "string", description: "Nova senha (OBRIGATÓRIO se o usuário pedir para atualizar a senha com uma senha específica. NÃO use se for reset - use isPasswordReset=true)" },
+                    newProfile: { type: "string", description: "Novo perfil do usuário (nome do perfil do sistema). IMPORTANTE: Promover para MASTER requer confirmação. Use queryProfiles para listar perfis disponíveis. OBRIGATÓRIO se o usuário pedir para atualizar o perfil." },
+                    isPasswordReset: { type: "boolean", description: "Se true, o sistema gerará uma senha aleatória e marcará que o usuário precisa trocar a senha no próximo login. Use quando o usuário pedir para 'resetar senha', 'trocar senha' de outro usuário (não a própria senha)." }
                 },
                 required: []
             }

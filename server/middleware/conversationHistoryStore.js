@@ -9,34 +9,65 @@ let memoryStore = new Map(); // Fallback em memória
 // Tentar conectar ao Redis
 const initRedis = async () => {
     try {
-        redisClient = redis.createClient({
-            url: process.env.REDIS_URL || 'redis://localhost:6379',
+        // Obter URL do Redis (pode ser local ou remoto)
+        const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+        
+        // Detectar se é Redis remoto ou local
+        const isRemote = !redisUrl.includes('localhost') && !redisUrl.includes('127.0.0.1');
+        const redisType = isRemote ? 'REMOTO' : 'LOCAL';
+        
+        console.log(`[REDIS] 🔌 Tentando conectar ao Redis ${redisType}: ${redisUrl.replace(/:[^:@]*@/, ':****@')}`); // Ocultar senha nos logs
+        
+        // Configuração do cliente Redis
+        const clientConfig = {
+            url: redisUrl,
             socket: {
                 reconnectStrategy: (retries) => {
-                    if (retries > 3) {
-                        console.log('[REDIS] Máximo de tentativas de reconexão atingido, usando store em memória');
+                    if (retries > 10) {
+                        console.log('[REDIS] ❌ Máximo de tentativas de reconexão atingido, usando store em memória');
                         return false; // Parar tentativas
                     }
-                    return Math.min(retries * 100, 3000); // Esperar até 3 segundos
-                }
+                    const delay = Math.min(retries * 100, 3000); // Esperar até 3 segundos
+                    console.log(`[REDIS] 🔄 Tentativa de reconexão ${retries}/10 em ${delay}ms...`);
+                    return delay;
+                },
+                // Timeout para conexões remotas
+                connectTimeout: isRemote ? 10000 : 5000, // 10s para remoto, 5s para local
             }
-        });
+        };
+
+        // Se for Redis remoto com SSL/TLS (rediss://)
+        if (redisUrl.startsWith('rediss://')) {
+            clientConfig.socket.tls = true;
+            console.log('[REDIS] 🔒 Usando conexão SSL/TLS (rediss://)');
+        }
+
+        redisClient = redis.createClient(clientConfig);
 
         redisClient.on('error', (err) => {
-            console.warn('[REDIS] Erro no cliente Redis:', err.message);
-            console.log('[REDIS] Usando store em memória como fallback');
+            console.warn('[REDIS] ❌ Erro no cliente Redis:', err.message);
+            console.log('[REDIS] ⚠️ Usando store em memória como fallback');
             redisClient = null;
         });
 
         redisClient.on('connect', () => {
-            console.log('[REDIS] Conectado ao Redis com sucesso');
+            console.log(`[REDIS] ✅ Conectado ao Redis ${redisType} com sucesso`);
+        });
+
+        redisClient.on('ready', () => {
+            console.log('[REDIS] ✅ Cliente Redis pronto para uso');
+        });
+
+        redisClient.on('reconnecting', () => {
+            console.log('[REDIS] 🔄 Reconectando ao Redis...');
         });
 
         await redisClient.connect();
-        console.log('[REDIS] Cliente Redis inicializado');
+        console.log('[REDIS] ✅ Cliente Redis inicializado e conectado');
     } catch (error) {
-        console.warn('[REDIS] Não foi possível conectar ao Redis:', error.message);
-        console.log('[REDIS] Usando store em memória como fallback');
+        console.warn('[REDIS] ❌ Não foi possível conectar ao Redis:', error.message);
+        console.log('[REDIS] ⚠️ Usando store em memória como fallback');
+        console.log('[REDIS] 💡 Dica: Verifique a variável REDIS_URL no arquivo .env');
         redisClient = null;
     }
 };
